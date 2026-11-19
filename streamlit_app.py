@@ -1,5 +1,6 @@
 from datetime import date, datetime
 import re
+import time
 import uuid
 import gspread
 from google.oauth2.service_account import Credentials
@@ -96,20 +97,53 @@ def get_spreadsheet():
     st.stop()
 
 
-def ensure_ws(sh, title, headers):
-  try:
-    ws = sh.worksheet(title)
-  except gspread.WorksheetNotFound:
-    ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers) + 2)
-    ws.append_row(headers)
-  values = ws.get_all_values()
-  if not values:
-    ws.append_row(headers)
-  return ws
+def ensure_ws(sh, title, headers, retries=3, delay=1.0):
+  for attempt in range(retries):
+    try:
+      try:
+        ws = sh.worksheet(title)
+      except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers) + 2)
+        ws.append_row(headers)
+      values = ws.get_all_values()
+      if not values:
+        ws.append_row(headers)
+      return ws
+    except Exception as exc:
+      if attempt < retries - 1:
+        time.sleep(delay * (2**attempt))
+      else:
+        st.error(
+            f"Error preparando la pestaña '{title}' en Google Sheets: {exc}"
+        )
+        st.stop()
 
 
-def read_df(ws, headers):
-  rows = ws.get_all_values()
+def read_df(ws, headers, retries=3, delay=1.0):
+  rows = None
+  last_exc = None
+
+  for attempt in range(retries):
+    try:
+      rows = ws.get_all_values()
+      break
+    except gspread.exceptions.APIError as exc:
+      last_exc = exc
+      if attempt < retries - 1:
+        time.sleep(delay * (2**attempt))
+      else:
+        st.error(
+            f"Error de Google Sheets al leer la pestaña '{ws.title}': {exc}"
+        )
+        st.stop()
+    except Exception as exc:
+      last_exc = exc
+      if attempt < retries - 1:
+        time.sleep(delay * (2**attempt))
+      else:
+        st.error(f"Error inesperado leyendo '{ws.title}': {last_exc}")
+        st.stop()
+
   if not rows or len(rows) <= 1:
     return pd.DataFrame(columns=headers)
 
@@ -251,9 +285,13 @@ prestamos_hoy = (
 
 if not prestamos_hoy.empty:
   prestamos_hoy["monto_num"] = parse_num(prestamos_hoy["monto_prestado"])
-  afecta_mask = prestamos_hoy["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
+  afecta_mask = (
+      prestamos_hoy["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
+  )
   total_prestado_caja_hoy = prestamos_hoy.loc[afecta_mask, "monto_num"].sum()
-  total_prestado_fuera_caja_hoy = prestamos_hoy.loc[~afecta_mask, "monto_num"].sum()
+  total_prestado_fuera_caja_hoy = prestamos_hoy.loc[
+      ~afecta_mask, "monto_num"
+  ].sum()
 else:
   total_prestado_caja_hoy = 0.0
   total_prestado_fuera_caja_hoy = 0.0
