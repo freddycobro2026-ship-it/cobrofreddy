@@ -178,6 +178,16 @@ def read_df(ws, headers, retries=3, delay=1.0):
   return df[headers]
 
 
+def get_col_index(ws, col_name, fallback_idx):
+  try:
+    header_row = [str(h).strip() for h in ws.row_values(1)]
+    if col_name in header_row:
+      return header_row.index(col_name) + 1
+  except Exception:
+    pass
+  return fallback_idx
+
+
 def parse_num(series):
   return pd.to_numeric(
       series.astype(str)
@@ -350,19 +360,49 @@ with tab_cobro:
       df_p_calc["estado_limpio"] = (
           df_p_calc["estado"].astype(str).str.strip().str.upper()
       )
+      df_p_calc["caja_limpio"] = (
+          df_p_calc["afecta_caja"]
+          .fillna("SI")
+          .astype(str)
+          .str.strip()
+          .str.upper()
+      )
+      df_p_calc.loc[df_p_calc["caja_limpio"] == "", "caja_limpio"] = "SI"
 
       activos = df_p_calc[
           (df_p_calc["saldo_num"] > 0) & (df_p_calc["estado_limpio"] != "PAGADO")
       ].copy()
 
+      st.caption(
+          f"Préstamos en hoja: **{len(df_p_calc)}** | Con saldo pendiente para"
+          f" cobrar: **{len(activos)}** (Sin descontar caja:"
+          f" **{(activos['caja_limpio'] == 'NO').sum()}**)"
+      )
+
+      filtro_caja_cobro = st.radio(
+          "Filtrar préstamos disponibles para cobro",
+          ["Todos con saldo", "Solo NO descuentan caja (NO)", "Solo SI descuentan caja (SI)"],
+          horizontal=True,
+          key="radio_filtro_caja_cobro",
+      )
+
+      if filtro_caja_cobro == "Solo NO descuentan caja (NO)":
+        activos = activos[activos["caja_limpio"] == "NO"]
+      elif filtro_caja_cobro == "Solo SI descuentan caja (SI)":
+        activos = activos[activos["caja_limpio"] == "SI"]
+
       if activos.empty:
-        st.info("No hay préstamos con saldo pendiente por cobrar.")
+        st.info(
+            "No hay préstamos con saldo pendiente bajo este filtro."
+            " Revisa la pestaña **Cartera de Clientes** para verificar el"
+            " `saldo_pendiente` y `estado` de cada préstamo."
+        )
       else:
         activos["etiqueta"] = activos.apply(
             lambda r: (
                 f"{r['id_prestamo']} | {r['cliente']} | Saldo por cobrar:"
                 f" ${r['saldo_num']:,.2f} | Cuota: ${r['cuota_num']:,.2f} |"
-                f" Caja: {r['afecta_caja'] or 'SI'}"
+                f" Caja: {r['caja_limpio']}"
             ),
             axis=1,
         )
@@ -412,8 +452,10 @@ with tab_cobro:
 
             cell = ws_prestamos.find(fila_p["id_prestamo"], in_column=1)
             if cell:
-              ws_prestamos.update_cell(cell.row, 10, nuevo_saldo)
-              ws_prestamos.update_cell(cell.row, 13, nuevo_estado)
+              col_saldo = get_col_index(ws_prestamos, "saldo_pendiente", 10)
+              col_estado = get_col_index(ws_prestamos, "estado", 13)
+              ws_prestamos.update_cell(cell.row, col_saldo, float(nuevo_saldo))
+              ws_prestamos.update_cell(cell.row, col_estado, nuevo_estado)
 
             append_movimiento(
                 ws_movs,
@@ -554,10 +596,10 @@ with tab_nuevo_p:
             cli_fila["telefono"],
             float(monto_prestado),
             float(interes_pct),
-            total_pagar,
-            cuota_val,
+            float(total_pagar),
+            float(cuota_val),
             frecuencia,
-            total_pagar,
+            float(total_pagar),
             hoy_str,
             flag_caja,
             "ACTIVO",
