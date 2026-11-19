@@ -109,10 +109,37 @@ def ensure_ws(sh, title, headers):
 
 
 def read_df(ws, headers):
-  records = ws.get_all_records()
-  if not records:
+  rows = ws.get_all_values()
+  if not rows or len(rows) <= 1:
     return pd.DataFrame(columns=headers)
-  df = pd.DataFrame(records)
+
+  raw_headers = [str(h).strip() for h in rows[0]]
+  data_rows = rows[1:]
+
+  # Si la fila 1 coincide exactamente con las cabeceras esperadas
+  if raw_headers == headers:
+    cleaned = [
+        r[: len(headers)] + [None] * max(0, len(headers) - len(r))
+        for r in data_rows
+        if any(str(c).strip() != "" for c in r)
+    ]
+    return pd.DataFrame(cleaned, columns=headers)
+
+  # Lectura tolerante si la hoja tenía otra estructura o cabeceras distintas
+  safe_cols = [
+      name if name else f"col_{idx}" for idx, name in enumerate(raw_headers)
+  ]
+  normalized_rows = []
+  for r in data_rows:
+    if not any(str(c).strip() != "" for c in r):
+      continue
+    padded = r[: len(safe_cols)] + [None] * max(0, len(safe_cols) - len(r))
+    normalized_rows.append(dict(zip(safe_cols, padded)))
+
+  if not normalized_rows:
+    return pd.DataFrame(columns=headers)
+
+  df = pd.DataFrame(normalized_rows)
   for col in headers:
     if col not in df.columns:
       df[col] = None
