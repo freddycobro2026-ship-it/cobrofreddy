@@ -103,11 +103,17 @@ def ensure_ws(sh, title, headers, retries=3, delay=1.0):
       try:
         ws = sh.worksheet(title)
       except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers) + 2)
+        ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers) + 4)
         ws.append_row(headers)
       values = ws.get_all_values()
       if not values:
         ws.append_row(headers)
+      else:
+        existing_headers = [str(h).strip() for h in values[0]]
+        missing = [h for h in headers if h not in existing_headers]
+        if missing:
+          new_headers = existing_headers + missing
+          ws.update(range_name="A1", values=[new_headers])
       return ws
     except Exception as exc:
       if attempt < retries - 1:
@@ -117,6 +123,23 @@ def ensure_ws(sh, title, headers, retries=3, delay=1.0):
             f"Error preparando la pestaña '{title}' en Google Sheets: {exc}"
         )
         st.stop()
+
+
+def append_by_headers(ws, row_dict, expected_headers):
+  """Escribe una fila alineada exactamente según las cabeceras reales de la hoja."""
+  header_row = [str(h).strip() for h in ws.row_values(1)]
+  if not header_row:
+    header_row = expected_headers
+    ws.append_row(header_row)
+
+  # Asegura que todas las cabeceras esperadas existan en fila 1
+  missing = [h for h in expected_headers if h not in header_row]
+  if missing:
+    header_row = header_row + missing
+    ws.update(range_name="A1", values=[header_row])
+
+  aligned_row = [row_dict.get(col, "") for col in header_row]
+  ws.append_row(aligned_row, value_input_option="USER_ENTERED")
 
 
 def read_df(ws, headers, retries=3, delay=1.0):
@@ -150,14 +173,6 @@ def read_df(ws, headers, retries=3, delay=1.0):
   raw_headers = [str(h).strip() for h in rows[0]]
   data_rows = rows[1:]
 
-  if raw_headers == headers:
-    cleaned = [
-        r[: len(headers)] + [None] * max(0, len(headers) - len(r))
-        for r in data_rows
-        if any(str(c).strip() != "" for c in r)
-    ]
-    return pd.DataFrame(cleaned, columns=headers)
-
   safe_cols = [
       name if name else f"col_{idx}" for idx, name in enumerate(raw_headers)
   ]
@@ -165,7 +180,7 @@ def read_df(ws, headers, retries=3, delay=1.0):
   for r in data_rows:
     if not any(str(c).strip() != "" for c in r):
       continue
-    padded = r[: len(safe_cols)] + [None] * max(0, len(safe_cols) - len(r))
+    padded = r[: len(safe_cols)] + [""] * max(0, len(safe_cols) - len(r))
     normalized_rows.append(dict(zip(safe_cols, padded)))
 
   if not normalized_rows:
@@ -174,7 +189,7 @@ def read_df(ws, headers, retries=3, delay=1.0):
   df = pd.DataFrame(normalized_rows)
   for col in headers:
     if col not in df.columns:
-      df[col] = None
+      df[col] = ""
   return df[headers]
 
 
@@ -199,14 +214,18 @@ def parse_num(series):
 
 
 def append_movimiento(ws_mov, tipo, referencia, monto, detalle):
-  ws_mov.append_row([
-      f"MOV-{uuid.uuid4().hex[:8].upper()}",
-      tipo,
-      referencia,
-      float(monto),
-      detalle,
-      datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-  ])
+  append_by_headers(
+      ws_mov,
+      {
+          "id_mov": f"MOV-{uuid.uuid4().hex[:8].upper()}",
+          "tipo": tipo,
+          "referencia": referencia,
+          "monto": float(monto),
+          "detalle": detalle,
+          "fecha_hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+      },
+      COLS_MOVS,
+  )
 
 
 # --- Conexión y preparación de hojas ---
@@ -235,7 +254,7 @@ with st.sidebar:
   )
 
   caja_hoy = (
-      df_caja[df_caja["fecha"].astype(str) == hoy_str]
+      df_caja[df_caja["fecha"].astype(str).str.strip() == hoy_str]
       if not df_caja.empty
       else pd.DataFrame()
   )
@@ -261,13 +280,17 @@ with st.sidebar:
       submitted_caja = st.form_submit_button("Registrar Cuadre Inicial")
       if submitted_caja:
         nombre_cob = cobrador_activo.strip() or "Cobrador"
-        ws_caja.append_row([
-            hoy_str,
-            float(monto_input),
-            nombre_cob,
-            "ABIERTA",
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        ])
+        append_by_headers(
+            ws_caja,
+            {
+                "fecha": hoy_str,
+                "monto_inicial": float(monto_input),
+                "cobrador": nombre_cob,
+                "estado": "ABIERTA",
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
+            COLS_CAJA,
+        )
         append_movimiento(
             ws_movs,
             "APERTURA_CAJA",
@@ -288,7 +311,9 @@ total_cobrado_hoy = (
 )
 
 prestamos_hoy = (
-    df_prestamos[df_prestamos["fecha_inicio"].astype(str) == hoy_str].copy()
+    df_prestamos[
+        df_prestamos["fecha_inicio"].astype(str).str.strip() == hoy_str
+    ].copy()
     if not df_prestamos.empty
     else pd.DataFrame(columns=COLS_PRESTAMOS)
 )
@@ -362,26 +387,24 @@ with tab_cobro:
       )
       df_p_calc["caja_limpio"] = (
           df_p_calc["afecta_caja"]
+          .replace("", "SI")
           .fillna("SI")
           .astype(str)
           .str.strip()
           .str.upper()
       )
-      df_p_calc.loc[df_p_calc["caja_limpio"] == "", "caja_limpio"] = "SI"
 
       activos = df_p_calc[
           (df_p_calc["saldo_num"] > 0) & (df_p_calc["estado_limpio"] != "PAGADO")
       ].copy()
 
-      st.caption(
-          f"Préstamos en hoja: **{len(df_p_calc)}** | Con saldo pendiente para"
-          f" cobrar: **{len(activos)}** (Sin descontar caja:"
-          f" **{(activos['caja_limpio'] == 'NO').sum()}**)"
-      )
-
       filtro_caja_cobro = st.radio(
           "Filtrar préstamos disponibles para cobro",
-          ["Todos con saldo", "Solo NO descuentan caja (NO)", "Solo SI descuentan caja (SI)"],
+          [
+              "Todos con saldo",
+              "Solo NO descuentan caja (NO)",
+              "Solo SI descuentan caja (SI)",
+          ],
           horizontal=True,
           key="radio_filtro_caja_cobro",
       )
@@ -392,11 +415,7 @@ with tab_cobro:
         activos = activos[activos["caja_limpio"] == "SI"]
 
       if activos.empty:
-        st.info(
-            "No hay préstamos con saldo pendiente bajo este filtro."
-            " Revisa la pestaña **Cartera de Clientes** para verificar el"
-            " `saldo_pendiente` y `estado` de cada préstamo."
-        )
+        st.info("No hay préstamos con saldo pendiente bajo este filtro.")
       else:
         activos["etiqueta"] = activos.apply(
             lambda r: (
@@ -439,18 +458,25 @@ with tab_cobro:
             ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             nombre_cob = cobrador_activo.strip() or "Cobrador"
 
-            ws_pagos.append_row([
-                id_pago,
-                fila_p["id_prestamo"],
-                fila_p["cliente"],
-                float(monto_pago),
-                metodo,
-                nuevo_saldo,
-                ahora_str,
-                nombre_cob,
-            ])
+            append_by_headers(
+                ws_pagos,
+                {
+                    "id_pago": id_pago,
+                    "id_prestamo": fila_p["id_prestamo"],
+                    "cliente": fila_p["cliente"],
+                    "monto_pagado": float(monto_pago),
+                    "metodo_pago": metodo,
+                    "saldo_restante": float(nuevo_saldo),
+                    "fecha_hora": ahora_str,
+                    "cobrador": nombre_cob,
+                },
+                COLS_PAGOS,
+            )
 
-            cell = ws_prestamos.find(fila_p["id_prestamo"], in_column=1)
+            col_id_p = get_col_index(ws_prestamos, "id_prestamo", 1)
+            cell = ws_prestamos.find(
+                str(fila_p["id_prestamo"]), in_column=col_id_p
+            )
             if cell:
               col_saldo = get_col_index(ws_prestamos, "saldo_pendiente", 10)
               col_estado = get_col_index(ws_prestamos, "estado", 13)
@@ -493,15 +519,19 @@ with tab_clientes:
         st.error("El nombre del cliente es obligatorio.")
       else:
         id_cliente = f"CLI-{uuid.uuid4().hex[:7].upper()}"
-        ws_clientes.append_row([
-            id_cliente,
-            cli_nombre.strip(),
-            cli_telefono.strip(),
-            cli_direccion.strip(),
-            cli_referencia.strip(),
-            hoy_str,
-            "ACTIVO",
-        ])
+        append_by_headers(
+            ws_clientes,
+            {
+                "id_cliente": id_cliente,
+                "nombre": cli_nombre.strip(),
+                "telefono": cli_telefono.strip(),
+                "direccion": cli_direccion.strip(),
+                "referencia": cli_referencia.strip(),
+                "fecha_registro": hoy_str,
+                "estado": "ACTIVO",
+            },
+            COLS_CLIENTES,
+        )
         append_movimiento(
             ws_movs,
             "NUEVO_CLIENTE",
@@ -589,21 +619,25 @@ with tab_nuevo_p:
         id_prestamo = f"PRE-{uuid.uuid4().hex[:7].upper()}"
         flag_caja = "SI" if descontar_de_caja else "NO"
 
-        ws_prestamos.append_row([
-            id_prestamo,
-            cli_fila["id_cliente"],
-            cli_fila["nombre"],
-            cli_fila["telefono"],
-            float(monto_prestado),
-            float(interes_pct),
-            float(total_pagar),
-            float(cuota_val),
-            frecuencia,
-            float(total_pagar),
-            hoy_str,
-            flag_caja,
-            "ACTIVO",
-        ])
+        append_by_headers(
+            ws_prestamos,
+            {
+                "id_prestamo": id_prestamo,
+                "id_cliente": cli_fila["id_cliente"],
+                "cliente": cli_fila["nombre"],
+                "telefono": cli_fila["telefono"],
+                "monto_prestado": float(monto_prestado),
+                "interes_pct": float(interes_pct),
+                "total_a_pagar": float(total_pagar),
+                "cuota_valor": float(cuota_val),
+                "frecuencia": frecuencia,
+                "saldo_pendiente": float(total_pagar),
+                "fecha_inicio": hoy_str,
+                "afecta_caja": flag_caja,
+                "estado": "ACTIVO",
+            },
+            COLS_PRESTAMOS,
+        )
         append_movimiento(
             ws_movs,
             "NUEVO_PRESTAMO",
