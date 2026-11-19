@@ -44,6 +44,7 @@ COLS_PRESTAMOS = [
     "frecuencia",
     "saldo_pendiente",
     "fecha_inicio",
+    "afecta_caja",
     "estado",
 ]
 COLS_PAGOS = [
@@ -145,7 +146,7 @@ df_movs = read_df(ws_movs, COLS_MOVS)
 
 hoy_str = date.today().strftime("%Y-%m-%d")
 
-# --- Sidebar: Cuadre de Caja Inicial Único (Intacto al registrar clientes) ---
+# --- Sidebar: Cuadre de Caja Inicial Único ---
 with st.sidebar:
   st.header("Cuadre de Caja Inicial")
   cobrador_activo = st.text_input(
@@ -164,8 +165,8 @@ with st.sidebar:
     monto_caja_inicial = float(caja_hoy.iloc[0]["monto_inicial"])
     st.success(f"Caja abierta hoy ({hoy_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
-        "El cuadre inicial es único por día y no cambia al registrar"
-        " clientes."
+        "El cuadre inicial es único por día y no cambia al registrar clientes"
+        " ni préstamos."
     )
   else:
     monto_caja_inicial = 0.0
@@ -197,7 +198,7 @@ with st.sidebar:
         )
         st.rerun()
 
-# --- Cálculos del día ---
+# --- Cálculos del día (solo préstamos marcados con afecta_caja == 'SI' mueven caja) ---
 pagos_hoy = (
     df_pagos[df_pagos["fecha_hora"].astype(str).str.startswith(hoy_str)].copy()
     if not df_pagos.empty
@@ -214,15 +215,29 @@ prestamos_hoy = (
     if not df_prestamos.empty
     else pd.DataFrame(columns=COLS_PRESTAMOS)
 )
-total_prestado_hoy = (
-    pd.to_numeric(prestamos_hoy["monto_prestado"], errors="coerce")
-    .fillna(0)
-    .sum()
-    if not prestamos_hoy.empty
-    else 0.0
-)
 
-efectivo_esperado = monto_caja_inicial + total_cobrado_hoy - total_prestado_hoy
+if not prestamos_hoy.empty:
+  prestamos_hoy_caja = prestamos_hoy[
+      prestamos_hoy["afecta_caja"].astype(str).str.upper() == "SI"
+  ]
+  total_prestado_caja_hoy = (
+      pd.to_numeric(prestamos_hoy_caja["monto_prestado"], errors="coerce")
+      .fillna(0)
+      .sum()
+  )
+  total_prestado_fuera_caja_hoy = (
+      pd.to_numeric(prestamos_hoy["monto_prestado"], errors="coerce")
+      .fillna(0)
+      .sum()
+      - total_prestado_caja_hoy
+  )
+else:
+  total_prestado_caja_hoy = 0.0
+  total_prestado_fuera_caja_hoy = 0.0
+
+efectivo_esperado = (
+    monto_caja_inicial + total_cobrado_hoy - total_prestado_caja_hoy
+)
 cartera_activa = (
     pd.to_numeric(df_prestamos["saldo_pendiente"], errors="coerce")
     .fillna(0)
@@ -237,12 +252,12 @@ st.title("Sistema de Cobro de Préstamos Personales")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Caja Inicial (Hoy)", f"${monto_caja_inicial:,.2f}")
 c2.metric("Cobrado Hoy", f"${total_cobrado_hoy:,.2f}")
-c3.metric("Prestado Hoy", f"${total_prestado_hoy:,.2f}")
+c3.metric("Prestado Hoy (En Caja)", f"${total_prestado_caja_hoy:,.2f}")
 c4.metric("Efectivo Esperado en Caja", f"${efectivo_esperado:,.2f}")
 
 st.caption(
-    f"Clientes registrados: **{len(df_clientes)}** | Cartera activa pendiente:"
-    f" **${cartera_activa:,.2f}**"
+    f"Prestado hoy sin mover caja: **${total_prestado_fuera_caja_hoy:,.2f}**"
+    f" | Cartera activa pendiente: **${cartera_activa:,.2f}**"
 )
 
 if caja_hoy.empty:
@@ -323,11 +338,11 @@ with tab_cobro:
             nombre_cob,
         ])
 
-        # Columna 10 = saldo_pendiente, Columna 12 = estado en COLS_PRESTAMOS
+        # Columna 10 = saldo_pendiente, Columna 13 = estado en COLS_PRESTAMOS
         cell = ws_prestamos.find(fila_p["id_prestamo"], in_column=1)
         if cell:
           ws_prestamos.update_cell(cell.row, 10, nuevo_saldo)
-          ws_prestamos.update_cell(cell.row, 12, nuevo_estado)
+          ws_prestamos.update_cell(cell.row, 13, nuevo_estado)
 
         append_movimiento(
             ws_movs,
@@ -346,9 +361,7 @@ with tab_clientes:
   st.subheader("Registrar Nuevo Cliente (No altera la Caja Inicial)")
   with st.form("form_nuevo_cliente", clear_on_submit=True):
     c_nom, c_tel = st.columns(2)
-    cli_nombre = c_nom.text_input(
-        "Nombre completo *", key="input_cli_nombre"
-    )
+    cli_nombre = c_nom.text_input("Nombre completo *", key="input_cli_nombre")
     cli_telefono = c_tel.text_input(
         "Teléfono / WhatsApp", key="input_cli_telefono"
     )
@@ -446,6 +459,14 @@ with tab_nuevo_p:
           ["Diario", "Semanal", "Quincenal", "Mensual"],
           key="select_frecuencia_cobro",
       )
+
+      # Botón único de decisión para mover o no la caja del día
+      descontar_de_caja = st.toggle(
+          "Descontar este préstamo de la caja del día (SI / NO)",
+          value=True,
+          key="toggle_descontar_caja",
+      )
+
       crear_p = st.form_submit_button("Registrar Préstamo")
 
       if crear_p:
@@ -454,6 +475,7 @@ with tab_nuevo_p:
         )
         cuota_val = round(total_pagar / int(num_cuotas), 2)
         id_prestamo = f"PRE-{uuid.uuid4().hex[:7].upper()}"
+        flag_caja = "SI" if descontar_de_caja else "NO"
 
         ws_prestamos.append_row([
             id_prestamo,
@@ -467,6 +489,7 @@ with tab_nuevo_p:
             frecuencia,
             total_pagar,
             hoy_str,
+            flag_caja,
             "ACTIVO",
         ])
         append_movimiento(
@@ -475,12 +498,12 @@ with tab_nuevo_p:
             id_prestamo,
             monto_prestado,
             f"Cliente: {cli_fila['nombre']} ({cli_fila['id_cliente']}) |"
-            f" Total a pagar: ${total_pagar:,.2f}",
+            f" Total: ${total_pagar:,.2f} | Afecta caja: {flag_caja}",
         )
         st.success(
             f"Préstamo {id_prestamo} creado para **{cli_fila['nombre']}**."
-            f" Total a pagar: ${total_pagar:,.2f} ({num_cuotas} cuotas de"
-            f" ${cuota_val:,.2f})"
+            f" Afecta caja: **{flag_caja}** | Total a pagar:"
+            f" ${total_pagar:,.2f}"
         )
         st.rerun()
 
