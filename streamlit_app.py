@@ -1,4 +1,5 @@
 from datetime import date, datetime
+import re
 import uuid
 import gspread
 from google.oauth2.service_account import Credentials
@@ -22,8 +23,18 @@ COLS_CAJA = [
     "estado",
     "timestamp",
 ]
+COLS_CLIENTES = [
+    "id_cliente",
+    "nombre",
+    "telefono",
+    "direccion",
+    "referencia",
+    "fecha_registro",
+    "estado",
+]
 COLS_PRESTAMOS = [
     "id_prestamo",
+    "id_cliente",
     "cliente",
     "telefono",
     "monto_prestado",
@@ -68,10 +79,14 @@ def get_spreadsheet():
   if "private_key" in info and isinstance(info["private_key"], str):
     info["private_key"] = info["private_key"].replace("\\n", "\n").strip()
 
+  raw_sheet_id = str(st.secrets["SHEET_ID"]).strip()
+  match = re.search(r"/d/([a-zA-Z0-9-_]+)", raw_sheet_id)
+  clean_sheet_id = match.group(1) if match else raw_sheet_id
+
   try:
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     client = gspread.authorize(creds)
-    return client.open_by_key(str(st.secrets["SHEET_ID"]).strip())
+    return client.open_by_key(clean_sheet_id)
   except Exception as exc:
     st.error(
         "Error al autenticar o abrir Google Sheets. Revisa la `private_key`,"
@@ -117,18 +132,20 @@ def append_movimiento(ws_mov, tipo, referencia, monto, detalle):
 # --- Conexión y preparación de hojas ---
 sh = get_spreadsheet()
 ws_caja = ensure_ws(sh, "caja_inicial", COLS_CAJA)
+ws_clientes = ensure_ws(sh, "clientes", COLS_CLIENTES)
 ws_prestamos = ensure_ws(sh, "prestamos", COLS_PRESTAMOS)
 ws_pagos = ensure_ws(sh, "historial_pagos", COLS_PAGOS)
 ws_movs = ensure_ws(sh, "historial_movimientos", COLS_MOVS)
 
 df_caja = read_df(ws_caja, COLS_CAJA)
+df_clientes = read_df(ws_clientes, COLS_CLIENTES)
 df_prestamos = read_df(ws_prestamos, COLS_PRESTAMOS)
 df_pagos = read_df(ws_pagos, COLS_PAGOS)
 df_movs = read_df(ws_movs, COLS_MOVS)
 
 hoy_str = date.today().strftime("%Y-%m-%d")
 
-# --- Sidebar: Cuadre de Caja Inicial Único ---
+# --- Sidebar: Cuadre de Caja Inicial Único (Intacto al registrar clientes) ---
 with st.sidebar:
   st.header("Cuadre de Caja Inicial")
   cobrador_activo = st.text_input(
@@ -147,8 +164,8 @@ with st.sidebar:
     monto_caja_inicial = float(caja_hoy.iloc[0]["monto_inicial"])
     st.success(f"Caja abierta hoy ({hoy_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
-        "Solo se permite un cuadre inicial por fecha para mantener la"
-        " integridad contable."
+        "El cuadre inicial es único por día y no cambia al registrar"
+        " clientes."
     )
   else:
     monto_caja_inicial = 0.0
@@ -180,7 +197,7 @@ with st.sidebar:
         )
         st.rerun()
 
-# --- Cálculos del día para el cuadre en tiempo real ---
+# --- Cálculos del día ---
 pagos_hoy = (
     df_pagos[df_pagos["fecha_hora"].astype(str).str.startswith(hoy_str)].copy()
     if not df_pagos.empty
@@ -224,7 +241,8 @@ c3.metric("Prestado Hoy", f"${total_prestado_hoy:,.2f}")
 c4.metric("Efectivo Esperado en Caja", f"${efectivo_esperado:,.2f}")
 
 st.caption(
-    f"Cartera activa total pendiente por cobrar: **${cartera_activa:,.2f}**"
+    f"Clientes registrados: **{len(df_clientes)}** | Cartera activa pendiente:"
+    f" **${cartera_activa:,.2f}**"
 )
 
 if caja_hoy.empty:
@@ -234,9 +252,10 @@ if caja_hoy.empty:
   )
   st.stop()
 
-# --- Pestañas operativas del cobrador ---
-tab_cobro, tab_nuevo, tab_cartera, tab_historial = st.tabs([
+# --- Pestañas operativas ---
+tab_cobro, tab_clientes, tab_nuevo_p, tab_cartera, tab_historial = st.tabs([
     "Registrar Cobro / Ruta",
+    "Registrar Clientes",
     "Nuevo Préstamo",
     "Cartera de Clientes",
     "Historial Inmutable (Sheets)",
@@ -244,134 +263,192 @@ tab_cobro, tab_nuevo, tab_cartera, tab_historial = st.tabs([
 
 with tab_cobro:
   st.subheader("Registrar Abono o Pago de Cliente")
-  contenedor_cobro = st.container()
+  activos = df_prestamos[
+      pd.to_numeric(df_prestamos["saldo_pendiente"], errors="coerce").fillna(0)
+      > 0
+  ].copy()
 
-  with contenedor_cobro:
-    activos = df_prestamos[
-        pd.to_numeric(df_prestamos["saldo_pendiente"], errors="coerce").fillna(
-            0
-        )
-        > 0
-    ].copy()
+  if activos.empty:
+    st.info("No hay préstamos con saldo pendiente en este momento.")
+  else:
+    activos["etiqueta"] = activos.apply(
+        lambda r: (
+            f"{r['id_prestamo']} | {r['cliente']} | Saldo:"
+            f" ${float(r['saldo_pendiente']):,.2f} | Cuota:"
+            f" ${float(r['cuota_valor']):,.2f}"
+        ),
+        axis=1,
+    )
+    seleccion = st.selectbox(
+        "Selecciona el préstamo",
+        activos["etiqueta"].tolist(),
+        key="select_prestamo_cobro",
+    )
+    fila_p = activos[activos["etiqueta"] == seleccion].iloc[0]
+    saldo_actual = float(fila_p["saldo_pendiente"])
+    cuota_sugerida = min(float(fila_p["cuota_valor"]), saldo_actual)
 
-    if activos.empty:
-      st.info("No hay préstamos con saldo pendiente en este momento.")
-    else:
-      activos["etiqueta"] = activos.apply(
-          lambda r: (
-              f"{r['id_prestamo']} | {r['cliente']} | Saldo:"
-              f" ${float(r['saldo_pendiente']):,.2f} | Cuota:"
-              f" ${float(r['cuota_valor']):,.2f}"
-          ),
-          axis=1,
+    with st.form("form_pago", clear_on_submit=True):
+      monto_pago = st.number_input(
+          "Monto a cobrar ($)",
+          min_value=0.01,
+          max_value=saldo_actual,
+          value=max(0.01, cuota_sugerida),
+          step=1.0,
+          format="%.2f",
+          key="input_monto_pago",
       )
-      seleccion = st.selectbox(
-          "Selecciona el préstamo",
-          activos["etiqueta"].tolist(),
-          key="select_prestamo_cobro",
+      metodo = st.selectbox(
+          "Método de pago",
+          ["Efectivo", "Pago Móvil / Transferencia", "Otro"],
+          key="select_metodo_pago",
       )
-      fila_p = activos[activos["etiqueta"] == seleccion].iloc[0]
-      saldo_actual = float(fila_p["saldo_pendiente"])
-      cuota_sugerida = min(float(fila_p["cuota_valor"]), saldo_actual)
+      confirmar_pago = st.form_submit_button("Guardar Pago en Historial")
 
-      with st.form("form_pago", clear_on_submit=True):
-        monto_pago = st.number_input(
-            "Monto a cobrar ($)",
-            min_value=0.01,
-            max_value=saldo_actual,
-            value=max(0.01, cuota_sugerida),
-            step=1.0,
-            format="%.2f",
-            key="input_monto_pago",
+      if confirmar_pago:
+        nuevo_saldo = round(saldo_actual - float(monto_pago), 2)
+        nuevo_estado = "PAGADO" if nuevo_saldo <= 0 else "ACTIVO"
+        id_pago = f"PAG-{uuid.uuid4().hex[:8].upper()}"
+        ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        nombre_cob = cobrador_activo.strip() or "Cobrador"
+
+        ws_pagos.append_row([
+            id_pago,
+            fila_p["id_prestamo"],
+            fila_p["cliente"],
+            float(monto_pago),
+            metodo,
+            nuevo_saldo,
+            ahora_str,
+            nombre_cob,
+        ])
+
+        # Columna 10 = saldo_pendiente, Columna 12 = estado en COLS_PRESTAMOS
+        cell = ws_prestamos.find(fila_p["id_prestamo"], in_column=1)
+        if cell:
+          ws_prestamos.update_cell(cell.row, 10, nuevo_saldo)
+          ws_prestamos.update_cell(cell.row, 12, nuevo_estado)
+
+        append_movimiento(
+            ws_movs,
+            "COBRO",
+            id_pago,
+            monto_pago,
+            f"Abono a {fila_p['id_prestamo']} ({fila_p['cliente']}). Nuevo"
+            f" saldo: ${nuevo_saldo:,.2f}",
         )
-        metodo = st.selectbox(
-            "Método de pago",
-            ["Efectivo", "Pago Móvil / Transferencia", "Otro"],
-            key="select_metodo_pago",
+        st.success(
+            f"Pago {id_pago} registrado. Saldo restante: ${nuevo_saldo:,.2f}"
         )
-        confirmar_pago = st.form_submit_button("Guardar Pago en Historial")
+        st.rerun()
 
-        if confirmar_pago:
-          nuevo_saldo = round(saldo_actual - float(monto_pago), 2)
-          nuevo_estado = "PAGADO" if nuevo_saldo <= 0 else "ACTIVO"
-          id_pago = f"PAG-{uuid.uuid4().hex[:8].upper()}"
-          ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-          nombre_cob = cobrador_activo.strip() or "Cobrador"
-
-          ws_pagos.append_row([
-              id_pago,
-              fila_p["id_prestamo"],
-              fila_p["cliente"],
-              float(monto_pago),
-              metodo,
-              nuevo_saldo,
-              ahora_str,
-              nombre_cob,
-          ])
-
-          cell = ws_prestamos.find(fila_p["id_prestamo"], in_column=1)
-          if cell:
-            ws_prestamos.update_cell(cell.row, 9, nuevo_saldo)
-            ws_prestamos.update_cell(cell.row, 11, nuevo_estado)
-
-          append_movimiento(
-              ws_movs,
-              "COBRO",
-              id_pago,
-              monto_pago,
-              f"Abono a {fila_p['id_prestamo']} ({fila_p['cliente']}). Nuevo"
-              f" saldo: ${nuevo_saldo:,.2f}",
-          )
-          st.success(
-              f"Pago {id_pago} registrado. Saldo restante: ${nuevo_saldo:,.2f}"
-          )
-          st.rerun()
-
-with tab_nuevo:
-  st.subheader("Otorgar Nuevo Préstamo")
-  with st.form("form_nuevo_prestamo", clear_on_submit=True):
-    col_a, col_b = st.columns(2)
-    cliente = col_a.text_input(
-        "Nombre completo del cliente", key="input_cliente_nuevo"
+with tab_clientes:
+  st.subheader("Registrar Nuevo Cliente (No altera la Caja Inicial)")
+  with st.form("form_nuevo_cliente", clear_on_submit=True):
+    c_nom, c_tel = st.columns(2)
+    cli_nombre = c_nom.text_input(
+        "Nombre completo *", key="input_cli_nombre"
     )
-    telefono = col_b.text_input(
-        "Teléfono / WhatsApp", key="input_telefono_nuevo"
+    cli_telefono = c_tel.text_input(
+        "Teléfono / WhatsApp", key="input_cli_telefono"
     )
 
-    col_c, col_d, col_e = st.columns(3)
-    monto_prestado = col_c.number_input(
-        "Capital prestado ($)",
-        min_value=1.0,
-        value=100.0,
-        step=10.0,
-        key="input_monto_prestado",
+    c_dir, c_ref = st.columns(2)
+    cli_direccion = c_dir.text_input(
+        "Dirección / Sector de ruta", key="input_cli_direccion"
     )
-    interes_pct = col_d.number_input(
-        "Interés total (%)",
-        min_value=0.0,
-        value=20.0,
-        step=1.0,
-        key="input_interes_pct",
-    )
-    num_cuotas = col_e.number_input(
-        "Número de cuotas",
-        min_value=1,
-        value=20,
-        step=1,
-        key="input_num_cuotas",
+    cli_referencia = c_ref.text_input(
+        "Referencia / Nota", key="input_cli_referencia"
     )
 
-    frecuencia = st.selectbox(
-        "Frecuencia de cobro",
-        ["Diario", "Semanal", "Quincenal", "Mensual"],
-        key="select_frecuencia_cobro",
-    )
-    crear_p = st.form_submit_button("Registrar Préstamo")
-
-    if crear_p:
-      if not cliente.strip():
-        st.error("Debes ingresar el nombre del cliente.")
+    guardar_cliente = st.form_submit_button("Guardar Cliente")
+    if guardar_cliente:
+      if not cli_nombre.strip():
+        st.error("El nombre del cliente es obligatorio.")
       else:
+        id_cliente = f"CLI-{uuid.uuid4().hex[:7].upper()}"
+        ws_clientes.append_row([
+            id_cliente,
+            cli_nombre.strip(),
+            cli_telefono.strip(),
+            cli_direccion.strip(),
+            cli_referencia.strip(),
+            hoy_str,
+            "ACTIVO",
+        ])
+        append_movimiento(
+            ws_movs,
+            "NUEVO_CLIENTE",
+            id_cliente,
+            0.0,
+            f"Cliente registrado: {cli_nombre.strip()} ({cli_telefono.strip()})",
+        )
+        st.success(
+            f"Cliente **{cli_nombre.strip()}** ({id_cliente}) guardado sin"
+            " modificar tu caja inicial."
+        )
+        st.rerun()
+
+  st.markdown("### Directorio de Clientes")
+  st.dataframe(df_clientes, use_container_width=True, hide_index=True)
+
+with tab_nuevo_p:
+  st.subheader("Otorgar Nuevo Préstamo a un Cliente")
+  if df_clientes.empty:
+    st.warning(
+        "Primero registra al menos un cliente en la pestaña **Registrar"
+        " Clientes**."
+    )
+  else:
+    df_clientes_view = df_clientes.copy()
+    df_clientes_view["selector"] = df_clientes_view.apply(
+        lambda r: (
+            f"{r['id_cliente']} | {r['nombre']} | Tel:"
+            f" {r['telefono'] or 'N/A'}"
+        ),
+        axis=1,
+    )
+    cli_sel_str = st.selectbox(
+        "Selecciona el cliente",
+        df_clientes_view["selector"].tolist(),
+        key="select_cliente_prestamo",
+    )
+    cli_fila = df_clientes_view[
+        df_clientes_view["selector"] == cli_sel_str
+    ].iloc[0]
+
+    with st.form("form_nuevo_prestamo", clear_on_submit=True):
+      col_c, col_d, col_e = st.columns(3)
+      monto_prestado = col_c.number_input(
+          "Capital prestado ($)",
+          min_value=1.0,
+          value=100.0,
+          step=10.0,
+          key="input_monto_prestado",
+      )
+      interes_pct = col_d.number_input(
+          "Interés total (%)",
+          min_value=0.0,
+          value=20.0,
+          step=1.0,
+          key="input_interes_pct",
+      )
+      num_cuotas = col_e.number_input(
+          "Número de cuotas",
+          min_value=1,
+          value=20,
+          step=1,
+          key="input_num_cuotas",
+      )
+
+      frecuencia = st.selectbox(
+          "Frecuencia de cobro",
+          ["Diario", "Semanal", "Quincenal", "Mensual"],
+          key="select_frecuencia_cobro",
+      )
+      crear_p = st.form_submit_button("Registrar Préstamo")
+
+      if crear_p:
         total_pagar = round(
             float(monto_prestado) * (1 + float(interes_pct) / 100.0), 2
         )
@@ -380,8 +457,9 @@ with tab_nuevo:
 
         ws_prestamos.append_row([
             id_prestamo,
-            cliente.strip(),
-            telefono.strip(),
+            cli_fila["id_cliente"],
+            cli_fila["nombre"],
+            cli_fila["telefono"],
             float(monto_prestado),
             float(interes_pct),
             total_pagar,
@@ -396,11 +474,13 @@ with tab_nuevo:
             "NUEVO_PRESTAMO",
             id_prestamo,
             monto_prestado,
-            f"Cliente: {cliente.strip()} | Total a pagar: ${total_pagar:,.2f}",
+            f"Cliente: {cli_fila['nombre']} ({cli_fila['id_cliente']}) |"
+            f" Total a pagar: ${total_pagar:,.2f}",
         )
         st.success(
-            f"Préstamo {id_prestamo} creado. Total a pagar: ${total_pagar:,.2f}"
-            f" ({num_cuotas} cuotas de ${cuota_val:,.2f})"
+            f"Préstamo {id_prestamo} creado para **{cli_fila['nombre']}**."
+            f" Total a pagar: ${total_pagar:,.2f} ({num_cuotas} cuotas de"
+            f" ${cuota_val:,.2f})"
         )
         st.rerun()
 
