@@ -77,6 +77,34 @@ COLS_MOVS = [
     "fecha_hora",
 ]
 
+HOJAS_CONFIG = [
+    ("caja_inicial", COLS_CAJA),
+    ("clientes", COLS_CLIENTES),
+    ("prestamos", COLS_PRESTAMOS),
+    ("historial_pagos", COLS_PAGOS),
+    ("historial_gastos", COLS_GASTOS),
+    ("historial_movimientos", COLS_MOVS),
+]
+
+
+def call_with_retry(func, retries=4, base_delay=2.0):
+  for attempt in range(retries):
+    try:
+      return func()
+    except gspread.exceptions.APIError as exc:
+      msg = str(exc)
+      is_rate_limit = "429" in msg or "Quota exceeded" in msg
+      if attempt < retries - 1:
+        sleep_s = (base_delay * (2**attempt)) + (2.0 if is_rate_limit else 0.0)
+        time.sleep(sleep_s)
+      else:
+        raise
+    except Exception:
+      if attempt < retries - 1:
+        time.sleep(base_delay * (2**attempt))
+      else:
+        raise
+
 
 @st.cache_resource
 def get_spreadsheet():
@@ -107,74 +135,30 @@ def get_spreadsheet():
     st.stop()
 
 
-def ensure_ws(sh, title, headers, retries=3, delay=1.0):
-  for attempt in range(retries):
-    try:
-      try:
-        ws = sh.worksheet(title)
-      except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=title, rows=2000, cols=len(headers) + 4)
-        ws.append_row(headers)
-      values = ws.get_all_values()
-      if not values:
-        ws.append_row(headers)
-      else:
-        existing_headers = [str(h).strip() for h in values[0]]
-        missing = [h for h in headers if h not in existing_headers]
-        if missing:
-          new_headers = existing_headers + missing
-          ws.update(range_name="A1", values=[new_headers])
-      return ws
-    except Exception as exc:
-      if attempt < retries - 1:
-        time.sleep(delay * (2**attempt))
-      else:
-        st.error(
-            f"Error preparando la pestaña '{title}' en Google Sheets: {exc}"
-        )
-        st.stop()
+@st.cache_resource(ttl=300)
+def get_worksheets_map(_sh):
+  """Obtiene o crea las pestañas una sola vez por ventana de caché."""
+  existing_titles = {
+      ws.title: ws for ws in call_with_retry(lambda: _sh.worksheets())
+  }
+  ws_map = {}
+
+  for title, headers in HOJAS_CONFIG:
+    if title in existing_titles:
+      ws = existing_titles[title]
+    else:
+      ws = call_with_retry(
+          lambda t=title, h=headers: _sh.add_worksheet(
+              title=t, rows=2000, cols=len(h) + 4
+          )
+      )
+      call_with_retry(lambda w=ws, h=headers: w.append_row(h))
+    ws_map[title] = ws
+
+  return ws_map
 
 
-def append_by_headers(ws, row_dict, expected_headers):
-  header_row = [str(h).strip() for h in ws.row_values(1)]
-  if not header_row:
-    header_row = expected_headers
-    ws.append_row(header_row)
-
-  missing = [h for h in expected_headers if h not in header_row]
-  if missing:
-    header_row = header_row + missing
-    ws.update(range_name="A1", values=[header_row])
-
-  aligned_row = [row_dict.get(col, "") for col in header_row]
-  ws.append_row(aligned_row, value_input_option="USER_ENTERED")
-
-
-def read_df(ws, headers, retries=3, delay=1.0):
-  rows = None
-  last_exc = None
-
-  for attempt in range(retries):
-    try:
-      rows = ws.get_all_values()
-      break
-    except gspread.exceptions.APIError as exc:
-      last_exc = exc
-      if attempt < retries - 1:
-        time.sleep(delay * (2**attempt))
-      else:
-        st.error(
-            f"Error de Google Sheets al leer la pestaña '{ws.title}': {exc}"
-        )
-        st.stop()
-    except Exception as exc:
-      last_exc = exc
-      if attempt < retries - 1:
-        time.sleep(delay * (2**attempt))
-      else:
-        st.error(f"Error inesperado leyendo '{ws.title}': {last_exc}")
-        st.stop()
-
+def rows_to_df(rows, headers):
   if not rows or len(rows) <= 1:
     return pd.DataFrame(columns=headers)
 
@@ -201,14 +185,62 @@ def read_df(ws, headers, retries=3, delay=1.0):
   return df[headers]
 
 
-def get_col_index(ws, col_name, fallback_idx):
+@st.cache_data(ttl=10, show_spinner=False)
+def load_all_sheets_cached(_sh, _cache_bust: int):
+  """Lee todas las pestañas en un solo batch_get para minimizar lecturas."""
+  ranges = [f"'{title}'!A1:Z2000" for title, _ in HOJAS_CONFIG]
   try:
-    header_row = [str(h).strip() for h in ws.row_values(1)]
-    if col_name in header_row:
-      return header_row.index(col_name) + 1
-  except Exception:
-    pass
-  return fallback_idx
+    batch_res = call_with_retry(
+        lambda: _sh.values_batch_get(
+            ranges, params={"valueRenderOption": "FORMATTED_VALUE"}
+        )
+    )
+    value_ranges = batch_res.get("valueRanges", [])
+    dfs = {}
+    headers_cache = {}
+
+    for idx, (title, expected_headers) in enumerate(HOJAS_CONFIG):
+      rows = (
+          value_ranges[idx].get("values", [])
+          if idx < len(value_ranges)
+          else []
+      )
+      if rows and len(rows[0]) > 0:
+        actual_h = [str(h).strip() for h in rows[0]]
+      else:
+        actual_h = expected_headers
+      headers_cache[title] = actual_h
+      dfs[title] = rows_to_df(rows, expected_headers)
+
+    return dfs, headers_cache
+
+  except Exception as exc:
+    st.error(
+        "Límite o error temporal de lectura en Google Sheets (429). Espera unos"
+        f" segundos y recarga: {exc}"
+    )
+    st.stop()
+
+
+def invalidate_sheets_cache():
+  st.session_state["cache_bust"] = st.session_state.get("cache_bust", 0) + 1
+  load_all_sheets_cached.clear()
+
+
+def append_by_headers(ws, title, row_dict, expected_headers, headers_cache):
+  header_row = headers_cache.get(title) or expected_headers
+  missing = [h for h in expected_headers if h not in header_row]
+  if missing:
+    header_row = header_row + missing
+    call_with_retry(
+        lambda h=header_row: ws.update(range_name="A1", values=[h])
+    )
+    headers_cache[title] = header_row
+
+  aligned_row = [row_dict.get(col, "") for col in header_row]
+  call_with_retry(
+      lambda r=aligned_row: ws.append_row(r, value_input_option="USER_ENTERED")
+  )
 
 
 def parse_num(series):
@@ -226,10 +258,13 @@ def es_pago_movil(metodo):
   return ("móvil" in m) or ("movil" in m) or ("transferencia" in m)
 
 
-def append_movimiento(ws_mov, tipo, referencia, monto, detalle, fecha_ref):
+def append_movimiento(
+    ws_mov, tipo, referencia, monto, detalle, fecha_ref, headers_cache
+):
   hora_actual = datetime.now().strftime("%H:%M:%S")
   append_by_headers(
       ws_mov,
+      "historial_movimientos",
       {
           "id_mov": f"MOV-{uuid.uuid4().hex[:8].upper()}",
           "tipo": tipo,
@@ -239,24 +274,71 @@ def append_movimiento(ws_mov, tipo, referencia, monto, detalle, fecha_ref):
           "fecha_hora": f"{fecha_ref} {hora_actual}",
       },
       COLS_MOVS,
+      headers_cache,
   )
 
 
-# --- Conexión y preparación de hojas ---
-sh = get_spreadsheet()
-ws_caja = ensure_ws(sh, "caja_inicial", COLS_CAJA)
-ws_clientes = ensure_ws(sh, "clientes", COLS_CLIENTES)
-ws_prestamos = ensure_ws(sh, "prestamos", COLS_PRESTAMOS)
-ws_pagos = ensure_ws(sh, "historial_pagos", COLS_PAGOS)
-ws_gastos = ensure_ws(sh, "historial_gastos", COLS_GASTOS)
-ws_movs = ensure_ws(sh, "historial_movimientos", COLS_MOVS)
+def actualizar_prestamo_en_hoja(ws_prestamos, id_prestamo, nuevo_saldo, nuevo_estado):
+  """Actualiza saldo_pendiente y estado en una sola petición batch_update."""
+  col_vals = call_with_retry(lambda: ws_prestamos.col_values(1))
+  fila_idx = None
+  for i, val in enumerate(col_vals, start=1):
+    if str(val).strip() == str(id_prestamo).strip():
+      fila_idx = i
+      break
 
-df_caja = read_df(ws_caja, COLS_CAJA)
-df_clientes = read_df(ws_clientes, COLS_CLIENTES)
-df_prestamos = read_df(ws_prestamos, COLS_PRESTAMOS)
-df_pagos = read_df(ws_pagos, COLS_PAGOS)
-df_gastos = read_df(ws_gastos, COLS_GASTOS)
-df_movs = read_df(ws_movs, COLS_MOVS)
+  if fila_idx:
+    header_row = [
+        str(h).strip()
+        for h in call_with_retry(lambda: ws_prestamos.row_values(1))
+    ]
+    col_saldo = (
+        header_row.index("saldo_pendiente") + 1
+        if "saldo_pendiente" in header_row
+        else 10
+    )
+    col_estado = (
+        header_row.index("estado") + 1 if "estado" in header_row else 13
+    )
+
+    def col_letter(n):
+      s = ""
+      while n > 0:
+        n, r = divmod(n - 1, 26)
+        s = chr(65 + r) + s
+      return s
+
+    rango_saldo = f"{col_letter(col_saldo)}{fila_idx}"
+    rango_estado = f"{col_letter(col_estado)}{fila_idx}"
+    call_with_retry(
+        lambda: ws_prestamos.batch_update([
+            {"range": rango_saldo, "values": [[float(nuevo_saldo)]]},
+            {"range": rango_estado, "values": [[nuevo_estado]]},
+        ])
+    )
+
+
+# --- Conexión y lectura optimizada ---
+if "cache_bust" not in st.session_state:
+  st.session_state["cache_bust"] = 0
+
+sh = get_spreadsheet()
+ws_map = get_worksheets_map(sh)
+dfs, headers_cache = load_all_sheets_cached(sh, st.session_state["cache_bust"])
+
+ws_caja = ws_map["caja_inicial"]
+ws_clientes = ws_map["clientes"]
+ws_prestamos = ws_map["prestamos"]
+ws_pagos = ws_map["historial_pagos"]
+ws_gastos = ws_map["historial_gastos"]
+ws_movs = ws_map["historial_movimientos"]
+
+df_caja = dfs["caja_inicial"]
+df_clientes = dfs["clientes"]
+df_prestamos = dfs["prestamos"]
+df_pagos = dfs["historial_pagos"]
+df_gastos = dfs["historial_gastos"]
+df_movs = dfs["historial_movimientos"]
 
 # --- Sidebar: Fecha operativa y Cuadre de Caja Inicial Único ---
 with st.sidebar:
@@ -267,6 +349,10 @@ with st.sidebar:
       key="input_fecha_operativa",
   )
   fecha_str = fecha_sel.strftime("%Y-%m-%d")
+
+  if st.button("Actualizar datos de Google Sheets", key="btn_refresh_sheets"):
+    invalidate_sheets_cache()
+    st.rerun()
 
   cobrador_activo = st.text_input(
       "Nombre del cobrador",
@@ -284,9 +370,7 @@ with st.sidebar:
     monto_caja_inicial = float(
         parse_num(caja_fecha["monto_inicial"]).iloc[0]
     )
-    st.success(
-        f"Caja abierta ({fecha_str}): **${monto_caja_inicial:,.2f}**"
-    )
+    st.success(f"Caja abierta ({fecha_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
         "El cuadre inicial es único por fecha y no cambia al registrar clientes,"
         " préstamos ni gastos."
@@ -310,6 +394,7 @@ with st.sidebar:
         hora_actual = datetime.now().strftime("%H:%M:%S")
         append_by_headers(
             ws_caja,
+            "caja_inicial",
             {
                 "fecha": fecha_str,
                 "monto_inicial": float(monto_input),
@@ -318,6 +403,7 @@ with st.sidebar:
                 "timestamp": f"{fecha_str} {hora_actual}",
             },
             COLS_CAJA,
+            headers_cache,
         )
         append_movimiento(
             ws_movs,
@@ -326,7 +412,9 @@ with st.sidebar:
             monto_input,
             f"Cuadre inicial por {nombre_cob}",
             fecha_str,
+            headers_cache,
         )
+        invalidate_sheets_cache()
         st.rerun()
 
 # --- Cálculos del día seleccionado ---
@@ -339,7 +427,6 @@ pagos_fecha = (
 if not pagos_fecha.empty:
   pagos_fecha["monto_num"] = parse_num(pagos_fecha["monto_pagado"])
   es_movil_mask = pagos_fecha["metodo_pago"].apply(es_pago_movil)
-  # Los pagos por Pago Móvil / Transferencia NO se suman al cuadre de caja
   total_cobrado_caja_fecha = pagos_fecha.loc[~es_movil_mask, "monto_num"].sum()
   total_cobrado_movil_fecha = pagos_fecha.loc[es_movil_mask, "monto_num"].sum()
 else:
@@ -543,6 +630,7 @@ with tab_cobro:
 
             append_by_headers(
                 ws_pagos,
+                "historial_pagos",
                 {
                     "id_pago": id_pago,
                     "id_prestamo": fila_p["id_prestamo"],
@@ -554,17 +642,12 @@ with tab_cobro:
                     "cobrador": nombre_cob,
                 },
                 COLS_PAGOS,
+                headers_cache,
             )
 
-            col_id_p = get_col_index(ws_prestamos, "id_prestamo", 1)
-            cell = ws_prestamos.find(
-                str(fila_p["id_prestamo"]), in_column=col_id_p
+            actualizar_prestamo_en_hoja(
+                ws_prestamos, fila_p["id_prestamo"], nuevo_saldo, nuevo_estado
             )
-            if cell:
-              col_saldo = get_col_index(ws_prestamos, "saldo_pendiente", 10)
-              col_estado = get_col_index(ws_prestamos, "estado", 13)
-              ws_prestamos.update_cell(cell.row, col_saldo, float(nuevo_saldo))
-              ws_prestamos.update_cell(cell.row, col_estado, nuevo_estado)
 
             nota_caja = (
                 "NO suma a caja (Pago Móvil/Transf.)"
@@ -579,7 +662,9 @@ with tab_cobro:
                 f"Abono a {fila_p['id_prestamo']} ({fila_p['cliente']}) |"
                 f" {metodo} ({nota_caja}) | Saldo: ${nuevo_saldo:,.2f}",
                 fecha_str,
+                headers_cache,
             )
+            invalidate_sheets_cache()
             st.success(
                 f"Pago {id_pago} registrado ({metodo}). Saldo restante:"
                 f" ${nuevo_saldo:,.2f}"
@@ -611,6 +696,7 @@ with tab_clientes:
         id_cliente = f"CLI-{uuid.uuid4().hex[:7].upper()}"
         append_by_headers(
             ws_clientes,
+            "clientes",
             {
                 "id_cliente": id_cliente,
                 "nombre": cli_nombre.strip(),
@@ -621,6 +707,7 @@ with tab_clientes:
                 "estado": "ACTIVO",
             },
             COLS_CLIENTES,
+            headers_cache,
         )
         append_movimiento(
             ws_movs,
@@ -629,7 +716,9 @@ with tab_clientes:
             0.0,
             f"Cliente registrado: {cli_nombre.strip()} ({cli_telefono.strip()})",
             fecha_str,
+            headers_cache,
         )
+        invalidate_sheets_cache()
         st.success(
             f"Cliente **{cli_nombre.strip()}** ({id_cliente}) guardado sin"
             " modificar tu caja inicial."
@@ -712,6 +801,7 @@ with tab_nuevo_p:
 
         append_by_headers(
             ws_prestamos,
+            "prestamos",
             {
                 "id_prestamo": id_prestamo,
                 "id_cliente": cli_fila["id_cliente"],
@@ -728,6 +818,7 @@ with tab_nuevo_p:
                 "estado": "ACTIVO",
             },
             COLS_PRESTAMOS,
+            headers_cache,
         )
         append_movimiento(
             ws_movs,
@@ -737,7 +828,9 @@ with tab_nuevo_p:
             f"Cliente: {cli_fila['nombre']} ({cli_fila['id_cliente']}) |"
             f" Total: ${total_pagar:,.2f} | Afecta caja: {flag_caja}",
             fecha_str,
+            headers_cache,
         )
+        invalidate_sheets_cache()
         st.success(
             f"Préstamo {id_prestamo} creado para **{cli_fila['nombre']}**."
             f" Saldo disponible por cobrar: **${total_pagar:,.2f}** | Afecta"
@@ -799,6 +892,7 @@ with tab_gastos:
 
         append_by_headers(
             ws_gastos,
+            "historial_gastos",
             {
                 "id_gasto": id_gasto,
                 "categoria": gasto_cat,
@@ -810,6 +904,7 @@ with tab_gastos:
                 "cobrador": nombre_cob,
             },
             COLS_GASTOS,
+            headers_cache,
         )
         append_movimiento(
             ws_movs,
@@ -819,7 +914,9 @@ with tab_gastos:
             f"[{gasto_cat}] {gasto_desc.strip()} | {gasto_metodo} | Afecta"
             f" caja: {flag_gasto_caja}",
             fecha_str,
+            headers_cache,
         )
+        invalidate_sheets_cache()
         st.success(
             f"Gasto {id_gasto} por **${float(gasto_monto):,.2f}** registrado"
             f" ({gasto_metodo} | Afecta caja: **{flag_gasto_caja}**)."
@@ -901,7 +998,9 @@ with tab_historial:
       cob_movil = 0.0
 
     pr_dia = (
-        df_prestamos[df_prestamos["fecha_inicio"].astype(str).str.strip() == f_dia]
+        df_prestamos[
+            df_prestamos["fecha_inicio"].astype(str).str.strip() == f_dia
+        ]
         if not df_prestamos.empty
         else pd.DataFrame(columns=COLS_PRESTAMOS)
     )
