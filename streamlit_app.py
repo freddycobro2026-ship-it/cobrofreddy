@@ -337,6 +337,54 @@ df_pagos = dfs["historial_pagos"]
 df_gastos = dfs["historial_gastos"]
 df_movs = dfs["historial_movimientos"]
 
+# --- Cálculos Generales (Caja Real Acumulada en todo el historial) ---
+total_cajas_iniciales_gen = (
+    float(parse_num(df_caja["monto_inicial"]).sum())
+    if not df_caja.empty
+    else 0.0
+)
+
+if not df_pagos.empty:
+  _p_all_vals = parse_num(df_pagos["monto_pagado"])
+  _p_all_mov = df_pagos["metodo_pago"].apply(es_pago_movil)
+  total_cobrado_caja_gen = float(_p_all_vals[~_p_all_mov].sum())
+  total_cobrado_movil_gen = float(_p_all_vals[_p_all_mov].sum())
+else:
+  total_cobrado_caja_gen = 0.0
+  total_cobrado_movil_gen = 0.0
+
+if not df_prestamos.empty:
+  _pr_all_vals = parse_num(df_prestamos["monto_prestado"])
+  _pr_all_caja = (
+      df_prestamos["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
+  )
+  total_prestado_caja_gen = float(_pr_all_vals[_pr_all_caja].sum())
+else:
+  total_prestado_caja_gen = 0.0
+
+if not df_gastos.empty:
+  _g_all_vals = parse_num(df_gastos["monto"])
+  _g_all_caja = (
+      df_gastos["afecta_caja"]
+      .replace("", "SI")
+      .fillna("SI")
+      .astype(str)
+      .str.strip()
+      .str.upper()
+      == "SI"
+  ) & (~df_gastos["metodo_pago"].apply(es_pago_movil))
+  total_gastos_caja_gen = float(_g_all_vals[_g_all_caja].sum())
+else:
+  total_gastos_caja_gen = 0.0
+
+caja_general_real = round(
+    total_cajas_iniciales_gen
+    + total_cobrado_caja_gen
+    - total_prestado_caja_gen
+    - total_gastos_caja_gen,
+    2,
+)
+
 # --- Sidebar: Fecha operativa y Cuadre de Caja Inicial Único ---
 with st.sidebar:
   st.header("Jornada y Caja Inicial")
@@ -357,6 +405,17 @@ with st.sidebar:
       key="input_cobrador_activo",
   )
 
+  st.divider()
+  st.subheader("Caja General Real")
+  st.metric("Efectivo Real en Caja (General)", f"${caja_general_real:,.2f}")
+  st.caption(
+      f"Cajas inic.: **${total_cajas_iniciales_gen:,.2f}** | Cobros efec.:"
+      f" **+${total_cobrado_caja_gen:,.2f}** | Préstamos caja:"
+      f" **-${total_prestado_caja_gen:,.2f}** | Gastos caja:"
+      f" **-${total_gastos_caja_gen:,.2f}**"
+  )
+
+  st.divider()
   caja_fecha = (
       df_caja[df_caja["fecha"].astype(str).str.strip() == fecha_str]
       if not df_caja.empty
@@ -526,6 +585,7 @@ if caja_fecha.empty:
     tab_clientes,
     tab_nuevo_p,
     tab_gastos,
+    tab_caja_gen,
     tab_cartera,
     tab_historial,
 ) = st.tabs([
@@ -533,6 +593,7 @@ if caja_fecha.empty:
     "Registrar Clientes",
     "Nuevo Préstamo",
     "Gastos",
+    "Caja General Real",
     "Cartera de Clientes",
     "Día a Día e Historial",
 ])
@@ -927,6 +988,54 @@ with tab_gastos:
     st.dataframe(
         gastos_fecha[COLS_GASTOS], use_container_width=True, hide_index=True
     )
+
+with tab_caja_gen:
+  st.subheader("Balance de Caja General Real (Acumulado Histórico)")
+  st.caption(
+      "Muestra cuánto efectivo queda realmente en caja en el acumulado general"
+      " (excluyendo Pago Móvil / Transferencia y movimientos marcados como"
+      " NO en caja)."
+  )
+
+  g1, g2, g3, g4, g5 = st.columns(5)
+  g1.metric("Cajas Iniciales (Total)", f"${total_cajas_iniciales_gen:,.2f}")
+  g2.metric("Cobrado Efectivo (Total)", f"+${total_cobrado_caja_gen:,.2f}")
+  g3.metric("Prestado en Caja (Total)", f"-${total_prestado_caja_gen:,.2f}")
+  g4.metric("Gastos en Caja (Total)", f"-${total_gastos_caja_gen:,.2f}")
+  g5.metric("Caja General Real", f"${caja_general_real:,.2f}")
+
+  st.markdown("### Desglose General de la Operación")
+  desglose_gen = pd.DataFrame([
+      {
+          "concepto": "Suma de Cajas Iniciales Registradas",
+          "monto": round(total_cajas_iniciales_gen, 2),
+      },
+      {
+          "concepto": "Total Cobrado en Efectivo / Caja (Excluye Pago Móvil)",
+          "monto": round(total_cobrado_caja_gen, 2),
+      },
+      {
+          "concepto": "Total Prestado con Cargo a Caja (afecta_caja = SI)",
+          "monto": round(-total_prestado_caja_gen, 2),
+      },
+      {
+          "concepto": "Total Gastos con Cargo a Caja (afecta_caja = SI)",
+          "monto": round(-total_gastos_caja_gen, 2),
+      },
+      {
+          "concepto": "EFECTIVO REAL GENERAL EN CAJA",
+          "monto": round(caja_general_real, 2),
+      },
+      {
+          "concepto": "Cobrado por Pago Móvil / Transferencia (Informativo)",
+          "monto": round(total_cobrado_movil_gen, 2),
+      },
+      {
+          "concepto": "Cartera Activa por Cobrar (Clientes)",
+          "monto": round(cartera_activa, 2),
+      },
+  ])
+  st.dataframe(desglose_gen, use_container_width=True, hide_index=True)
 
 with tab_cartera:
   st.subheader("Cartera Completa de Préstamos")
