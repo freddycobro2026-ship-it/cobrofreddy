@@ -58,6 +58,16 @@ COLS_PAGOS = [
     "fecha_hora",
     "cobrador",
 ]
+COLS_GASTOS = [
+    "id_gasto",
+    "categoria",
+    "descripcion",
+    "monto",
+    "metodo_pago",
+    "afecta_caja",
+    "fecha_hora",
+    "cobrador",
+]
 COLS_MOVS = [
     "id_mov",
     "tipo",
@@ -126,13 +136,11 @@ def ensure_ws(sh, title, headers, retries=3, delay=1.0):
 
 
 def append_by_headers(ws, row_dict, expected_headers):
-  """Escribe una fila alineada exactamente según las cabeceras reales de la hoja."""
   header_row = [str(h).strip() for h in ws.row_values(1)]
   if not header_row:
     header_row = expected_headers
     ws.append_row(header_row)
 
-  # Asegura que todas las cabeceras esperadas existan en fila 1
   missing = [h for h in expected_headers if h not in header_row]
   if missing:
     header_row = header_row + missing
@@ -213,7 +221,13 @@ def parse_num(series):
   ).fillna(0.0)
 
 
-def append_movimiento(ws_mov, tipo, referencia, monto, detalle):
+def es_pago_movil(metodo):
+  m = str(metodo or "").strip().lower()
+  return ("móvil" in m) or ("movil" in m) or ("transferencia" in m)
+
+
+def append_movimiento(ws_mov, tipo, referencia, monto, detalle, fecha_ref):
+  hora_actual = datetime.now().strftime("%H:%M:%S")
   append_by_headers(
       ws_mov,
       {
@@ -222,7 +236,7 @@ def append_movimiento(ws_mov, tipo, referencia, monto, detalle):
           "referencia": referencia,
           "monto": float(monto),
           "detalle": detalle,
-          "fecha_hora": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+          "fecha_hora": f"{fecha_ref} {hora_actual}",
       },
       COLS_MOVS,
   )
@@ -234,41 +248,54 @@ ws_caja = ensure_ws(sh, "caja_inicial", COLS_CAJA)
 ws_clientes = ensure_ws(sh, "clientes", COLS_CLIENTES)
 ws_prestamos = ensure_ws(sh, "prestamos", COLS_PRESTAMOS)
 ws_pagos = ensure_ws(sh, "historial_pagos", COLS_PAGOS)
+ws_gastos = ensure_ws(sh, "historial_gastos", COLS_GASTOS)
 ws_movs = ensure_ws(sh, "historial_movimientos", COLS_MOVS)
 
 df_caja = read_df(ws_caja, COLS_CAJA)
 df_clientes = read_df(ws_clientes, COLS_CLIENTES)
 df_prestamos = read_df(ws_prestamos, COLS_PRESTAMOS)
 df_pagos = read_df(ws_pagos, COLS_PAGOS)
+df_gastos = read_df(ws_gastos, COLS_GASTOS)
 df_movs = read_df(ws_movs, COLS_MOVS)
 
-hoy_str = date.today().strftime("%Y-%m-%d")
-
-# --- Sidebar: Cuadre de Caja Inicial Único ---
+# --- Sidebar: Fecha operativa y Cuadre de Caja Inicial Único ---
 with st.sidebar:
-  st.header("Cuadre de Caja Inicial")
+  st.header("Jornada y Caja Inicial")
+  fecha_sel = st.date_input(
+      "Fecha operativa (Día a día)",
+      value=date.today(),
+      key="input_fecha_operativa",
+  )
+  fecha_str = fecha_sel.strftime("%Y-%m-%d")
+
   cobrador_activo = st.text_input(
       "Nombre del cobrador",
       value="Cobrador 01",
       key="input_cobrador_activo",
   )
 
-  caja_hoy = (
-      df_caja[df_caja["fecha"].astype(str).str.strip() == hoy_str]
+  caja_fecha = (
+      df_caja[df_caja["fecha"].astype(str).str.strip() == fecha_str]
       if not df_caja.empty
       else pd.DataFrame()
   )
 
-  if not caja_hoy.empty:
-    monto_caja_inicial = float(parse_num(caja_hoy["monto_inicial"]).iloc[0])
-    st.success(f"Caja abierta hoy ({hoy_str}): **${monto_caja_inicial:,.2f}**")
+  if not caja_fecha.empty:
+    monto_caja_inicial = float(
+        parse_num(caja_fecha["monto_inicial"]).iloc[0]
+    )
+    st.success(
+        f"Caja abierta ({fecha_str}): **${monto_caja_inicial:,.2f}**"
+    )
     st.caption(
-        "El cuadre inicial es único por día y no cambia al registrar clientes"
-        " ni préstamos."
+        "El cuadre inicial es único por fecha y no cambia al registrar clientes,"
+        " préstamos ni gastos."
     )
   else:
     monto_caja_inicial = 0.0
-    st.warning("Aún no has registrado el cuadre de caja inicial de hoy.")
+    st.warning(
+        f"Aún no has registrado el cuadre de caja inicial para {fecha_str}."
+    )
     with st.form("form_caja_inicial", clear_on_submit=True):
       monto_input = st.number_input(
           "Monto inicial en caja ($)",
@@ -280,59 +307,103 @@ with st.sidebar:
       submitted_caja = st.form_submit_button("Registrar Cuadre Inicial")
       if submitted_caja:
         nombre_cob = cobrador_activo.strip() or "Cobrador"
+        hora_actual = datetime.now().strftime("%H:%M:%S")
         append_by_headers(
             ws_caja,
             {
-                "fecha": hoy_str,
+                "fecha": fecha_str,
                 "monto_inicial": float(monto_input),
                 "cobrador": nombre_cob,
                 "estado": "ABIERTA",
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "timestamp": f"{fecha_str} {hora_actual}",
             },
             COLS_CAJA,
         )
         append_movimiento(
             ws_movs,
             "APERTURA_CAJA",
-            hoy_str,
+            fecha_str,
             monto_input,
             f"Cuadre inicial por {nombre_cob}",
+            fecha_str,
         )
         st.rerun()
 
-# --- Cálculos del día ---
-pagos_hoy = (
-    df_pagos[df_pagos["fecha_hora"].astype(str).str.startswith(hoy_str)].copy()
+# --- Cálculos del día seleccionado ---
+pagos_fecha = (
+    df_pagos[df_pagos["fecha_hora"].astype(str).str.startswith(fecha_str)].copy()
     if not df_pagos.empty
     else pd.DataFrame(columns=COLS_PAGOS)
 )
-total_cobrado_hoy = (
-    parse_num(pagos_hoy["monto_pagado"]).sum() if not pagos_hoy.empty else 0.0
-)
 
-prestamos_hoy = (
+if not pagos_fecha.empty:
+  pagos_fecha["monto_num"] = parse_num(pagos_fecha["monto_pagado"])
+  es_movil_mask = pagos_fecha["metodo_pago"].apply(es_pago_movil)
+  # Los pagos por Pago Móvil / Transferencia NO se suman al cuadre de caja
+  total_cobrado_caja_fecha = pagos_fecha.loc[~es_movil_mask, "monto_num"].sum()
+  total_cobrado_movil_fecha = pagos_fecha.loc[es_movil_mask, "monto_num"].sum()
+else:
+  total_cobrado_caja_fecha = 0.0
+  total_cobrado_movil_fecha = 0.0
+
+prestamos_fecha = (
     df_prestamos[
-        df_prestamos["fecha_inicio"].astype(str).str.strip() == hoy_str
+        df_prestamos["fecha_inicio"].astype(str).str.strip() == fecha_str
     ].copy()
     if not df_prestamos.empty
     else pd.DataFrame(columns=COLS_PRESTAMOS)
 )
 
-if not prestamos_hoy.empty:
-  prestamos_hoy["monto_num"] = parse_num(prestamos_hoy["monto_prestado"])
-  afecta_mask = (
-      prestamos_hoy["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
+if not prestamos_fecha.empty:
+  prestamos_fecha["monto_num"] = parse_num(prestamos_fecha["monto_prestado"])
+  afecta_p_mask = (
+      prestamos_fecha["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
   )
-  total_prestado_caja_hoy = prestamos_hoy.loc[afecta_mask, "monto_num"].sum()
-  total_prestado_fuera_caja_hoy = prestamos_hoy.loc[
-      ~afecta_mask, "monto_num"
+  total_prestado_caja_fecha = prestamos_fecha.loc[
+      afecta_p_mask, "monto_num"
+  ].sum()
+  total_prestado_fuera_caja_fecha = prestamos_fecha.loc[
+      ~afecta_p_mask, "monto_num"
   ].sum()
 else:
-  total_prestado_caja_hoy = 0.0
-  total_prestado_fuera_caja_hoy = 0.0
+  total_prestado_caja_fecha = 0.0
+  total_prestado_fuera_caja_fecha = 0.0
 
-efectivo_esperado = (
-    monto_caja_inicial + total_cobrado_hoy - total_prestado_caja_hoy
+gastos_fecha = (
+    df_gastos[
+        df_gastos["fecha_hora"].astype(str).str.startswith(fecha_str)
+    ].copy()
+    if not df_gastos.empty
+    else pd.DataFrame(columns=COLS_GASTOS)
+)
+
+if not gastos_fecha.empty:
+  gastos_fecha["monto_num"] = parse_num(gastos_fecha["monto"])
+  afecta_g_mask = (
+      gastos_fecha["afecta_caja"]
+      .replace("", "SI")
+      .fillna("SI")
+      .astype(str)
+      .str.strip()
+      .str.upper()
+      == "SI"
+  )
+  gasto_no_movil_mask = ~gastos_fecha["metodo_pago"].apply(es_pago_movil)
+  total_gastos_caja_fecha = gastos_fecha.loc[
+      afecta_g_mask & gasto_no_movil_mask, "monto_num"
+  ].sum()
+  total_gastos_fuera_caja_fecha = gastos_fecha.loc[
+      ~(afecta_g_mask & gasto_no_movil_mask), "monto_num"
+  ].sum()
+else:
+  total_gastos_caja_fecha = 0.0
+  total_gastos_fuera_caja_fecha = 0.0
+
+efectivo_esperado_caja = (
+    monto_caja_inicial
+    + total_cobrado_caja_fecha
+    - total_prestado_caja_fecha
+    - total_gastos_caja_fecha
 )
 cartera_activa = (
     parse_num(df_prestamos["saldo_pendiente"]).sum()
@@ -340,35 +411,46 @@ cartera_activa = (
     else 0.0
 )
 
-# --- Encabezado y KPIs ---
-st.title("Sistema de Cobro de Préstamos Personales")
+# --- Encabezado y KPIs del día ---
+st.title(f"Sistema de Cobro — Jornada {fecha_str}")
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Caja Inicial (Hoy)", f"${monto_caja_inicial:,.2f}")
-c2.metric("Cobrado Hoy", f"${total_cobrado_hoy:,.2f}")
-c3.metric("Prestado Hoy (En Caja)", f"${total_prestado_caja_hoy:,.2f}")
-c4.metric("Efectivo Esperado en Caja", f"${efectivo_esperado:,.2f}")
+c1, c2, c3, c4, c5 = st.columns(5)
+c1.metric("Caja Inicial", f"${monto_caja_inicial:,.2f}")
+c2.metric("Cobrado en Caja (Efec.)", f"${total_cobrado_caja_fecha:,.2f}")
+c3.metric("Prestado (En Caja)", f"${total_prestado_caja_fecha:,.2f}")
+c4.metric("Gastos (En Caja)", f"${total_gastos_caja_fecha:,.2f}")
+c5.metric("Efectivo Esperado en Caja", f"${efectivo_esperado_caja:,.2f}")
 
 st.caption(
-    f"Prestado hoy sin mover caja: **${total_prestado_fuera_caja_hoy:,.2f}**"
-    f" | Clientes registrados: **{len(df_clientes)}** | Cartera activa"
-    f" pendiente: **${cartera_activa:,.2f}**"
+    f"Pago Móvil / Transf. del día (no suma a caja):"
+    f" **${total_cobrado_movil_fecha:,.2f}** | Prestado sin caja:"
+    f" **${total_prestado_fuera_caja_fecha:,.2f}** | Gastos sin caja:"
+    f" **${total_gastos_fuera_caja_fecha:,.2f}** | Cartera activa:"
+    f" **${cartera_activa:,.2f}**"
 )
 
-if caja_hoy.empty:
+if caja_fecha.empty:
   st.info(
-      "Registra primero el **Cuadre de Caja Inicial** en la barra lateral para"
-      " operar la jornada."
+      f"Registra primero el **Cuadre de Caja Inicial** para **{fecha_str}**"
+      " en la barra lateral para operar."
   )
   st.stop()
 
 # --- Pestañas operativas ---
-tab_cobro, tab_clientes, tab_nuevo_p, tab_cartera, tab_historial = st.tabs([
+(
+    tab_cobro,
+    tab_clientes,
+    tab_nuevo_p,
+    tab_gastos,
+    tab_cartera,
+    tab_historial,
+) = st.tabs([
     "Registrar Cobro / Ruta",
     "Registrar Clientes",
     "Nuevo Préstamo",
+    "Gastos",
     "Cartera de Clientes",
-    "Historial Inmutable (Sheets)",
+    "Día a Día e Historial",
 ])
 
 with tab_cobro:
@@ -455,7 +537,8 @@ with tab_cobro:
             nuevo_saldo = round(saldo_actual - float(monto_pago), 2)
             nuevo_estado = "PAGADO" if nuevo_saldo <= 0 else "ACTIVO"
             id_pago = f"PAG-{uuid.uuid4().hex[:8].upper()}"
-            ahora_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            hora_actual = datetime.now().strftime("%H:%M:%S")
+            fecha_hora_reg = f"{fecha_str} {hora_actual}"
             nombre_cob = cobrador_activo.strip() or "Cobrador"
 
             append_by_headers(
@@ -467,7 +550,7 @@ with tab_cobro:
                     "monto_pagado": float(monto_pago),
                     "metodo_pago": metodo,
                     "saldo_restante": float(nuevo_saldo),
-                    "fecha_hora": ahora_str,
+                    "fecha_hora": fecha_hora_reg,
                     "cobrador": nombre_cob,
                 },
                 COLS_PAGOS,
@@ -483,16 +566,23 @@ with tab_cobro:
               ws_prestamos.update_cell(cell.row, col_saldo, float(nuevo_saldo))
               ws_prestamos.update_cell(cell.row, col_estado, nuevo_estado)
 
+            nota_caja = (
+                "NO suma a caja (Pago Móvil/Transf.)"
+                if es_pago_movil(metodo)
+                else "Suma a caja"
+            )
             append_movimiento(
                 ws_movs,
                 "COBRO",
                 id_pago,
                 monto_pago,
-                f"Abono a {fila_p['id_prestamo']} ({fila_p['cliente']}). Nuevo"
-                f" saldo: ${nuevo_saldo:,.2f}",
+                f"Abono a {fila_p['id_prestamo']} ({fila_p['cliente']}) |"
+                f" {metodo} ({nota_caja}) | Saldo: ${nuevo_saldo:,.2f}",
+                fecha_str,
             )
             st.success(
-                f"Pago {id_pago} registrado. Saldo restante: ${nuevo_saldo:,.2f}"
+                f"Pago {id_pago} registrado ({metodo}). Saldo restante:"
+                f" ${nuevo_saldo:,.2f}"
             )
             st.rerun()
 
@@ -527,7 +617,7 @@ with tab_clientes:
                 "telefono": cli_telefono.strip(),
                 "direccion": cli_direccion.strip(),
                 "referencia": cli_referencia.strip(),
-                "fecha_registro": hoy_str,
+                "fecha_registro": fecha_str,
                 "estado": "ACTIVO",
             },
             COLS_CLIENTES,
@@ -538,6 +628,7 @@ with tab_clientes:
             id_cliente,
             0.0,
             f"Cliente registrado: {cli_nombre.strip()} ({cli_telefono.strip()})",
+            fecha_str,
         )
         st.success(
             f"Cliente **{cli_nombre.strip()}** ({id_cliente}) guardado sin"
@@ -632,7 +723,7 @@ with tab_nuevo_p:
                 "cuota_valor": float(cuota_val),
                 "frecuencia": frecuencia,
                 "saldo_pendiente": float(total_pagar),
-                "fecha_inicio": hoy_str,
+                "fecha_inicio": fecha_str,
                 "afecta_caja": flag_caja,
                 "estado": "ACTIVO",
             },
@@ -645,6 +736,7 @@ with tab_nuevo_p:
             monto_prestado,
             f"Cliente: {cli_fila['nombre']} ({cli_fila['id_cliente']}) |"
             f" Total: ${total_pagar:,.2f} | Afecta caja: {flag_caja}",
+            fecha_str,
         )
         st.success(
             f"Préstamo {id_prestamo} creado para **{cli_fila['nombre']}**."
@@ -652,6 +744,95 @@ with tab_nuevo_p:
             f" caja: **{flag_caja}**"
         )
         st.rerun()
+
+with tab_gastos:
+  st.subheader("Registrar Gasto Operativo")
+  with st.form("form_nuevo_gasto", clear_on_submit=True):
+    g_col1, g_col2, g_col3 = st.columns(3)
+    gasto_cat = g_col1.selectbox(
+        "Categoría",
+        [
+            "Gasolina / Transporte",
+            "Comida / Viáticos",
+            "Recargas / Datos",
+            "Mantenimiento / Repuestos",
+            "Otros",
+        ],
+        key="select_gasto_categoria",
+    )
+    gasto_monto = g_col2.number_input(
+        "Monto del gasto ($)",
+        min_value=0.01,
+        value=5.0,
+        step=1.0,
+        format="%.2f",
+        key="input_gasto_monto",
+    )
+    gasto_metodo = g_col3.selectbox(
+        "Método de pago",
+        ["Efectivo", "Pago Móvil / Transferencia", "Otro"],
+        key="select_gasto_metodo",
+    )
+
+    gasto_desc = st.text_input(
+        "Detalle o concepto del gasto *",
+        placeholder="Ej. Combustible moto ruta norte",
+        key="input_gasto_desc",
+    )
+
+    descontar_gasto_caja = st.toggle(
+        "Descontar este gasto de la caja del día (SI / NO)",
+        value=True,
+        key="toggle_descontar_gasto_caja",
+    )
+
+    guardar_gasto = st.form_submit_button("Registrar Gasto")
+    if guardar_gasto:
+      if not gasto_desc.strip():
+        st.error("Ingresa un detalle o concepto para el gasto.")
+      else:
+        id_gasto = f"GAS-{uuid.uuid4().hex[:8].upper()}"
+        flag_gasto_caja = "SI" if descontar_gasto_caja else "NO"
+        hora_actual = datetime.now().strftime("%H:%M:%S")
+        fecha_hora_reg = f"{fecha_str} {hora_actual}"
+        nombre_cob = cobrador_activo.strip() or "Cobrador"
+
+        append_by_headers(
+            ws_gastos,
+            {
+                "id_gasto": id_gasto,
+                "categoria": gasto_cat,
+                "descripcion": gasto_desc.strip(),
+                "monto": float(gasto_monto),
+                "metodo_pago": gasto_metodo,
+                "afecta_caja": flag_gasto_caja,
+                "fecha_hora": fecha_hora_reg,
+                "cobrador": nombre_cob,
+            },
+            COLS_GASTOS,
+        )
+        append_movimiento(
+            ws_movs,
+            "GASTO",
+            id_gasto,
+            gasto_monto,
+            f"[{gasto_cat}] {gasto_desc.strip()} | {gasto_metodo} | Afecta"
+            f" caja: {flag_gasto_caja}",
+            fecha_str,
+        )
+        st.success(
+            f"Gasto {id_gasto} por **${float(gasto_monto):,.2f}** registrado"
+            f" ({gasto_metodo} | Afecta caja: **{flag_gasto_caja}**)."
+        )
+        st.rerun()
+
+  st.markdown(f"### Gastos Registrados ({fecha_str})")
+  if gastos_fecha.empty:
+    st.info(f"No se han registrado gastos en la fecha {fecha_str}.")
+  else:
+    st.dataframe(
+        gastos_fecha[COLS_GASTOS], use_container_width=True, hide_index=True
+    )
 
 with tab_cartera:
   st.subheader("Cartera Completa de Préstamos")
@@ -666,8 +847,116 @@ with tab_cartera:
   st.dataframe(vista_p, use_container_width=True, hide_index=True)
 
 with tab_historial:
+  st.subheader("Resumen Día a Día por Fecha")
+
+  fechas_set = set()
+  if not df_caja.empty:
+    fechas_set.update(
+        [d.strip() for d in df_caja["fecha"].astype(str) if d.strip()]
+    )
+  if not df_prestamos.empty:
+    fechas_set.update([
+        d.strip() for d in df_prestamos["fecha_inicio"].astype(str) if d.strip()
+    ])
+  if not df_pagos.empty:
+    fechas_set.update([
+        d.astype(str).str[:10].strip()
+        for _, d in df_pagos["fecha_hora"].items()
+        if str(d).strip()
+    ])
+  if not df_gastos.empty:
+    fechas_set.update([
+        d.astype(str).str[:10].strip()
+        for _, d in df_gastos["fecha_hora"].items()
+        if str(d).strip()
+    ])
+
+  fechas_ordenadas = sorted(fechas_set, reverse=True)
+  resumen_dias = []
+
+  for f_dia in fechas_ordenadas:
+    c_dia = (
+        df_caja[df_caja["fecha"].astype(str).str.strip() == f_dia]
+        if not df_caja.empty
+        else pd.DataFrame()
+    )
+    m_ini = (
+        float(parse_num(c_dia["monto_inicial"]).iloc[0])
+        if not c_dia.empty
+        else 0.0
+    )
+
+    p_dia = (
+        df_pagos[df_pagos["fecha_hora"].astype(str).str.startswith(f_dia)]
+        if not df_pagos.empty
+        else pd.DataFrame(columns=COLS_PAGOS)
+    )
+    if not p_dia.empty:
+      p_vals = parse_num(p_dia["monto_pagado"])
+      p_mov_mask = p_dia["metodo_pago"].apply(es_pago_movil)
+      cob_caja = float(p_vals[~p_mov_mask].sum())
+      cob_movil = float(p_vals[p_mov_mask].sum())
+    else:
+      cob_caja = 0.0
+      cob_movil = 0.0
+
+    pr_dia = (
+        df_prestamos[df_prestamos["fecha_inicio"].astype(str).str.strip() == f_dia]
+        if not df_prestamos.empty
+        else pd.DataFrame(columns=COLS_PRESTAMOS)
+    )
+    if not pr_dia.empty:
+      pr_vals = parse_num(pr_dia["monto_prestado"])
+      pr_caja_mask = (
+          pr_dia["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
+      )
+      pres_caja = float(pr_vals[pr_caja_mask].sum())
+    else:
+      pres_caja = 0.0
+
+    g_dia = (
+        df_gastos[df_gastos["fecha_hora"].astype(str).str.startswith(f_dia)]
+        if not df_gastos.empty
+        else pd.DataFrame(columns=COLS_GASTOS)
+    )
+    if not g_dia.empty:
+      g_vals = parse_num(g_dia["monto"])
+      g_caja_mask = (
+          g_dia["afecta_caja"]
+          .replace("", "SI")
+          .fillna("SI")
+          .astype(str)
+          .str.strip()
+          .str.upper()
+          == "SI"
+      ) & (~g_dia["metodo_pago"].apply(es_pago_movil))
+      gas_caja = float(g_vals[g_caja_mask].sum())
+    else:
+      gas_caja = 0.0
+
+    efec_cierre = round(m_ini + cob_caja - pres_caja - gas_caja, 2)
+    resumen_dias.append({
+        "fecha": f_dia,
+        "caja_inicial": round(m_ini, 2),
+        "cobrado_caja": round(cob_caja, 2),
+        "cobrado_pago_movil": round(cob_movil, 2),
+        "prestado_caja": round(pres_caja, 2),
+        "gastos_caja": round(gas_caja, 2),
+        "efectivo_esperado_caja": efec_cierre,
+    })
+
+  if resumen_dias:
+    st.dataframe(
+        pd.DataFrame(resumen_dias), use_container_width=True, hide_index=True
+    )
+  else:
+    st.info("Aún no hay movimientos registrados por fecha.")
+
   st.subheader("Historial de Pagos (Solo Lectura / Nunca se Borra)")
   st.dataframe(df_pagos, use_container_width=True, hide_index=True)
+
+  st.subheader("Historial de Gastos (Solo Lectura / Nunca se Borra)")
+  st.dataframe(df_gastos, use_container_width=True, hide_index=True)
 
   st.subheader("Bitácora de Movimientos del Sistema")
   st.dataframe(df_movs, use_container_width=True, hide_index=True)
