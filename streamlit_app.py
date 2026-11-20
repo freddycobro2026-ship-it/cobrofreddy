@@ -1007,8 +1007,27 @@ with tab_historial:
           pr_dia["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
       )
       pres_caja = float(pr_vals[pr_caja_mask].sum())
+
+      nombres_unicos = []
+      detalles_items = []
+      for _, r_p in pr_dia.iterrows():
+        nom_c = str(r_p.get("cliente", "")).strip() or "Sin nombre"
+        m_p = float(
+            parse_num(pd.Series([r_p.get("monto_prestado", 0)])).iloc[0]
+        )
+        af_c = (
+            str(r_p.get("afecta_caja", "SI") or "SI").strip().upper() or "SI"
+        )
+        if nom_c not in nombres_unicos:
+          nombres_unicos.append(nom_c)
+        detalles_items.append(f"{nom_c} (${m_p:,.2f} | Caja: {af_c})")
+
+      clientes_prestados_str = ", ".join(nombres_unicos)
+      detalle_prestamos_str = " ; ".join(detalles_items)
     else:
       pres_caja = 0.0
+      clientes_prestados_str = "—"
+      detalle_prestamos_str = "—"
 
     g_dia = (
         df_gastos[df_gastos["fecha_hora"].astype(str).str.startswith(f_dia)]
@@ -1033,6 +1052,8 @@ with tab_historial:
     efec_cierre = round(m_ini + cob_caja - pres_caja - gas_caja, 2)
     resumen_dias.append({
         "fecha": f_dia,
+        "clientes_prestados": clientes_prestados_str,
+        "detalle_prestamos_dia": detalle_prestamos_str,
         "caja_inicial": round(m_ini, 2),
         "cobrado_caja": round(cob_caja, 2),
         "cobrado_pago_movil": round(cob_movil, 2),
