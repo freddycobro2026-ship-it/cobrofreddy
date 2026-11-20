@@ -68,6 +68,20 @@ COLS_GASTOS = [
     "fecha_hora",
     "cobrador",
 ]
+COLS_CIERRES_GEN = [
+    "id_cierre",
+    "fecha_hora_cierre",
+    "cobrador",
+    "caja_general_calculada",
+    "efectivo_contado_fisico",
+    "diferencia",
+    "cobrado_efectivo_total",
+    "cobrado_pago_movil_total",
+    "prestado_caja_total",
+    "gastos_caja_total",
+    "cartera_activa",
+    "observacion",
+]
 COLS_MOVS = [
     "id_mov",
     "tipo",
@@ -83,6 +97,7 @@ HOJAS_CONFIG = [
     ("prestamos", COLS_PRESTAMOS),
     ("historial_pagos", COLS_PAGOS),
     ("historial_gastos", COLS_GASTOS),
+    ("cierres_caja_general", COLS_CIERRES_GEN),
     ("historial_movimientos", COLS_MOVS),
 ]
 
@@ -328,6 +343,7 @@ ws_clientes = ws_map["clientes"]
 ws_prestamos = ws_map["prestamos"]
 ws_pagos = ws_map["historial_pagos"]
 ws_gastos = ws_map["historial_gastos"]
+ws_cierres_gen = ws_map["cierres_caja_general"]
 ws_movs = ws_map["historial_movimientos"]
 
 df_caja = dfs["caja_inicial"]
@@ -335,6 +351,7 @@ df_clientes = dfs["clientes"]
 df_prestamos = dfs["prestamos"]
 df_pagos = dfs["historial_pagos"]
 df_gastos = dfs["historial_gastos"]
+df_cierres_gen = dfs["cierres_caja_general"]
 df_movs = dfs["historial_movimientos"]
 
 # --- Cálculos Generales (Caja Real Acumulada en todo el historial) ---
@@ -383,6 +400,11 @@ caja_general_real = round(
     - total_prestado_caja_gen
     - total_gastos_caja_gen,
     2,
+)
+cartera_activa = (
+    float(parse_num(df_prestamos["saldo_pendiente"]).sum())
+    if not df_prestamos.empty
+    else 0.0
 )
 
 # --- Sidebar: Fecha operativa y Cuadre de Caja Inicial Único ---
@@ -547,11 +569,6 @@ efectivo_esperado_caja = (
     + total_cobrado_caja_fecha
     - total_prestado_caja_fecha
     - total_gastos_caja_fecha
-)
-cartera_activa = (
-    parse_num(df_prestamos["saldo_pendiente"]).sum()
-    if not df_prestamos.empty
-    else 0.0
 )
 
 # --- Encabezado y KPIs del día ---
@@ -1036,6 +1053,89 @@ with tab_caja_gen:
       },
   ])
   st.dataframe(desglose_gen, use_container_width=True, hide_index=True)
+
+  st.divider()
+  st.subheader("Cierre de Caja General")
+  with st.form("form_cierre_caja_general", clear_on_submit=True):
+    col_c1, col_c2 = st.columns(2)
+    efectivo_contado = col_c1.number_input(
+        "Efectivo físico contado al cierre ($)",
+        min_value=0.0,
+        value=max(0.0, float(caja_general_real)),
+        step=1.0,
+        format="%.2f",
+        key="input_efectivo_contado_general",
+    )
+    obs_cierre = col_c2.text_input(
+        "Observación del cierre",
+        placeholder="Ej. Cierre general verificado en efectivo",
+        key="input_obs_cierre_general",
+    )
+
+    btn_cierre_general = st.form_submit_button(
+        "Ejecutar Cierre de Caja General"
+    )
+    if btn_cierre_general:
+      id_cierre = f"CIE-{uuid.uuid4().hex[:8].upper()}"
+      ahora_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+      nombre_cob = cobrador_activo.strip() or "Cobrador"
+      diferencia_cierre = round(
+          float(efectivo_contado) - float(caja_general_real), 2
+      )
+
+      append_by_headers(
+          ws_cierres_gen,
+          "cierres_caja_general",
+          {
+              "id_cierre": id_cierre,
+              "fecha_hora_cierre": ahora_full,
+              "cobrador": nombre_cob,
+              "caja_general_calculada": round(float(caja_general_real), 2),
+              "efectivo_contado_fisico": round(float(efectivo_contado), 2),
+              "diferencia": diferencia_cierre,
+              "cobrado_efectivo_total": round(
+                  float(total_cobrado_caja_gen), 2
+              ),
+              "cobrado_pago_movil_total": round(
+                  float(total_cobrado_movil_gen), 2
+              ),
+              "prestado_caja_total": round(
+                  float(total_prestado_caja_gen), 2
+              ),
+              "gastos_caja_total": round(float(total_gastos_caja_gen), 2),
+              "cartera_activa": round(float(cartera_activa), 2),
+              "observacion": obs_cierre.strip(),
+          },
+          COLS_CIERRES_GEN,
+          headers_cache,
+      )
+      append_movimiento(
+          ws_movs,
+          "CIERRE_CAJA_GENERAL",
+          id_cierre,
+          float(efectivo_contado),
+          f"Cierre general por {nombre_cob} | Calculado:"
+          f" ${caja_general_real:,.2f} | Contado:"
+          f" ${float(efectivo_contado):,.2f} | Dif: ${diferencia_cierre:,.2f}",
+          fecha_str,
+          headers_cache,
+      )
+      invalidate_sheets_cache()
+      st.success(
+          f"Cierre de Caja General **{id_cierre}** guardado. Calculado:"
+          f" **${caja_general_real:,.2f}** | Contado:"
+          f" **${float(efectivo_contado):,.2f}** | Diferencia:"
+          f" **${diferencia_cierre:,.2f}**"
+      )
+      st.rerun()
+
+  st.markdown("### Historial de Cierres de Caja General")
+  if df_cierres_gen.empty:
+    st.info("Aún no se han registrado cierres de caja general.")
+  else:
+    st.dataframe(
+        df_cierres_gen, use_container_width=True, hide_index=True
+    )
 
 with tab_cartera:
   st.subheader("Cartera Completa de Préstamos")
