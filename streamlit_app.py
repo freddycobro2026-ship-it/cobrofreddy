@@ -137,7 +137,6 @@ def get_spreadsheet():
 
 @st.cache_resource(ttl=300)
 def get_worksheets_map(_sh):
-  """Obtiene o crea las pestañas una sola vez por ventana de caché."""
   existing_titles = {
       ws.title: ws for ws in call_with_retry(lambda: _sh.worksheets())
   }
@@ -187,7 +186,6 @@ def rows_to_df(rows, headers):
 
 @st.cache_data(ttl=10, show_spinner=False)
 def load_all_sheets_cached(_sh, _cache_bust: int):
-  """Lee todas las pestañas en un solo batch_get para minimizar lecturas."""
   ranges = [f"'{title}'!A1:Z2000" for title, _ in HOJAS_CONFIG]
   try:
     batch_res = call_with_retry(
@@ -279,7 +277,6 @@ def append_movimiento(
 
 
 def actualizar_prestamo_en_hoja(ws_prestamos, id_prestamo, nuevo_saldo, nuevo_estado):
-  """Actualiza saldo_pendiente y estado en una sola petición batch_update."""
   col_vals = call_with_retry(lambda: ws_prestamos.col_values(1))
   fila_idx = None
   for i, val in enumerate(col_vals, start=1):
@@ -957,15 +954,15 @@ with tab_historial:
     ])
   if not df_pagos.empty:
     fechas_set.update([
-        d.astype(str).str[:10].strip()
-        for _, d in df_pagos["fecha_hora"].items()
-        if str(d).strip()
+        f
+        for f in df_pagos["fecha_hora"].astype(str).str[:10].str.strip()
+        if f
     ])
   if not df_gastos.empty:
     fechas_set.update([
-        d.astype(str).str[:10].strip()
-        for _, d in df_gastos["fecha_hora"].items()
-        if str(d).strip()
+        f
+        for f in df_gastos["fecha_hora"].astype(str).str[:10].str.strip()
+        if f
     ])
 
   fechas_ordenadas = sorted(fechas_set, reverse=True)
