@@ -86,7 +86,6 @@ COLS_CIERRES_GEN = [
     "diferencia",
     "cobrado_efectivo_total",
     "cobrado_pago_movil_total",
-    "cajas_sacadas_total",
     "prestado_caja_total",
     "gastos_caja_total",
     "cartera_activa",
@@ -367,15 +366,9 @@ df_gastos = dfs["historial_gastos"]
 df_cierres_gen = dfs["cierres_caja_general"]
 df_movs = dfs["historial_movimientos"]
 
-# --- Cálculos Generales (Caja Real Acumulada en todo el historial) ---
+# --- Cálculos Generales (Saldo General: Fondo Base + Llegado - Prestado - Gasto) ---
 total_fondo_base_gen = (
     float(parse_num(df_fondo["monto"]).sum()) if not df_fondo.empty else 0.0
-)
-
-total_cajas_sacadas_gen = (
-    float(parse_num(df_caja["monto_inicial"]).sum())
-    if not df_caja.empty
-    else 0.0
 )
 
 if not df_pagos.empty:
@@ -414,7 +407,6 @@ else:
 caja_general_real = round(
     total_fondo_base_gen
     + total_cobrado_caja_gen
-    - total_cajas_sacadas_gen
     - total_prestado_caja_gen
     - total_gastos_caja_gen,
     2,
@@ -425,9 +417,9 @@ cartera_activa = (
     else 0.0
 )
 
-# --- Sidebar: Fecha operativa y Cuadre de Caja Inicial Único ---
+# --- Sidebar: Fecha operativa y Salida del Día ---
 with st.sidebar:
-  st.header("Jornada y Caja Inicial")
+  st.header("Jornada y Salida del Día")
   fecha_sel = st.date_input(
       "Fecha operativa (Día a día)",
       value=date.today(),
@@ -446,12 +438,11 @@ with st.sidebar:
   )
 
   st.divider()
-  st.subheader("Caja General Real")
-  st.metric("Efectivo Real en Caja (General)", f"${caja_general_real:,.2f}")
+  st.subheader("Saldo General de Caja")
+  st.metric("Saldo General Real", f"${caja_general_real:,.2f}")
   st.caption(
-      f"Fondo base: **+${total_fondo_base_gen:,.2f}** | Cobros efec.:"
-      f" **+${total_cobrado_caja_gen:,.2f}** | Cajas sacadas:"
-      f" **-${total_cajas_sacadas_gen:,.2f}** | Préstamos caja:"
+      f"Fondo base: **+${total_fondo_base_gen:,.2f}** | Llegado efec.:"
+      f" **+${total_cobrado_caja_gen:,.2f}** | Prestado caja:"
       f" **-${total_prestado_caja_gen:,.2f}** | Gastos caja:"
       f" **-${total_gastos_caja_gen:,.2f}**"
   )
@@ -469,8 +460,8 @@ with st.sidebar:
     )
     st.success(f"Salida del día ({fecha_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
-        "Fórmula esperado: Caja General - Salida del día + Llegado del cobro"
-        " - Gastos en caja."
+        "La salida del día no se suma al saldo general; se resta en el"
+        " esperado del día (Llegado - Salida - Prestado - Gasto)."
     )
   else:
     monto_caja_inicial = 0.0
@@ -587,11 +578,11 @@ else:
   total_gastos_caja_fecha = 0.0
   total_gastos_fuera_caja_fecha = 0.0
 
-# Fórmula solicitada: Caja General - Salida del día + Llegado del cobro - Gastos en caja
+# Esperado del día: Llegado - Salida del día - Prestado en caja - Gasto en caja
 efectivo_esperado_caja = round(
-    float(caja_general_real)
+    float(total_cobrado_caja_fecha)
     - float(monto_caja_inicial)
-    + float(total_cobrado_caja_fecha)
+    - float(total_prestado_caja_fecha)
     - float(total_gastos_caja_fecha),
     2,
 )
@@ -600,16 +591,15 @@ efectivo_esperado_caja = round(
 st.title(f"Sistema de Cobro — Jornada {fecha_str}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Caja General", f"${caja_general_real:,.2f}")
+c1.metric("Llegado del Cobro", f"+${total_cobrado_caja_fecha:,.2f}")
 c2.metric("Salida del Día", f"-${monto_caja_inicial:,.2f}")
-c3.metric("Llegado del Cobro", f"+${total_cobrado_caja_fecha:,.2f}")
+c3.metric("Prestado (En Caja)", f"-${total_prestado_caja_fecha:,.2f}")
 c4.metric("Gastos (En Caja)", f"-${total_gastos_caja_fecha:,.2f}")
 c5.metric("Esperado", f"${efectivo_esperado_caja:,.2f}")
 
 st.caption(
-    f"Pago Móvil / Transf. del día (no suma a caja):"
-    f" **${total_cobrado_movil_fecha:,.2f}** | Prestado en caja del día:"
-    f" **${total_prestado_caja_fecha:,.2f}** | Prestado sin caja:"
+    f"Saldo General: **${caja_general_real:,.2f}** | Pago Móvil / Transf."
+    f" del día: **${total_cobrado_movil_fecha:,.2f}** | Prestado sin caja:"
     f" **${total_prestado_fuera_caja_fecha:,.2f}** | Gastos sin caja:"
     f" **${total_gastos_fuera_caja_fecha:,.2f}** | Cartera activa:"
     f" **${cartera_activa:,.2f}**"
@@ -1035,18 +1025,16 @@ with tab_gastos:
 with tab_caja_gen:
   st.subheader("Balance de Caja General Real (Acumulado Histórico)")
   st.caption(
-      "Suma (+) el fondo base / capital inicial de caja general y los cobros"
-      " en efectivo; descuenta (-) las cajas iniciales sacadas para salir a"
-      " ruta, préstamos y gastos con cargo a caja."
+      "Saldo General = Fondo Base (+) + Llegado Efectivo (+) - Prestado en"
+      " Caja (-) - Gastos en Caja (-). No suma salidas del día."
   )
 
-  g1, g2, g3, g4, g5, g6 = st.columns(6)
+  g1, g2, g3, g4, g5 = st.columns(5)
   g1.metric("Fondo Base (+)", f"+${total_fondo_base_gen:,.2f}")
-  g2.metric("Cobros Efectivo (+)", f"+${total_cobrado_caja_gen:,.2f}")
-  g3.metric("Cajas Sacadas (-)", f"-${total_cajas_sacadas_gen:,.2f}")
-  g4.metric("Préstamos Caja (-)", f"-${total_prestado_caja_gen:,.2f}")
-  g5.metric("Gastos Caja (-)", f"-${total_gastos_caja_gen:,.2f}")
-  g6.metric("Caja General Real", f"${caja_general_real:,.2f}")
+  g2.metric("Llegado Efectivo (+)", f"+${total_cobrado_caja_gen:,.2f}")
+  g3.metric("Prestado Caja (-)", f"-${total_prestado_caja_gen:,.2f}")
+  g4.metric("Gastos Caja (-)", f"-${total_gastos_caja_gen:,.2f}")
+  g5.metric("Saldo General Real", f"${caja_general_real:,.2f}")
 
   st.markdown("### Registrar Fondo Base / Capital Inicial de Caja General")
   with st.form("form_fondo_base_general", clear_on_submit=True):
@@ -1122,10 +1110,6 @@ with tab_caja_gen:
           "monto": round(total_cobrado_caja_gen, 2),
       },
       {
-          "concepto": "Total Cajas Iniciales Sacadas para Ruta (- Descuento)",
-          "monto": round(-total_cajas_sacadas_gen, 2),
-      },
-      {
           "concepto": "Total Prestado con Cargo a Caja (- afecta_caja = SI)",
           "monto": round(-total_prestado_caja_gen, 2),
       },
@@ -1134,7 +1118,7 @@ with tab_caja_gen:
           "monto": round(-total_gastos_caja_gen, 2),
       },
       {
-          "concepto": "EFECTIVO REAL GENERAL EN CAJA",
+          "concepto": "SALDO GENERAL REAL EN CAJA",
           "monto": round(caja_general_real, 2),
       },
       {
@@ -1200,7 +1184,6 @@ with tab_caja_gen:
               "cobrado_pago_movil_total": round(
                   float(total_cobrado_movil_gen), 2
               ),
-              "cajas_sacadas_total": round(float(total_cajas_sacadas_gen), 2),
               "prestado_caja_total": round(
                   float(total_prestado_caja_gen), 2
               ),
@@ -1360,20 +1343,16 @@ with tab_historial:
     else:
       gas_caja = 0.0
 
-    # Fórmula solicitada: Caja General - Salida del día + Llegado del cobro - Gastos en caja
-    efec_cierre = round(
-        float(caja_general_real) - m_ini + cob_caja - gas_caja, 2
-    )
+    efec_cierre = round(cob_caja - m_ini - pres_caja - gas_caja, 2)
     resumen_dias.append({
         "fecha": f_dia,
         "clientes_prestados": clientes_prestados_str,
         "detalle_prestamos_dia": detalle_prestamos_str,
-        "caja_general": round(float(caja_general_real), 2),
-        "salida_dia": round(m_ini, 2),
         "llegado_cobro": round(cob_caja, 2),
+        "salida_dia": round(m_ini, 2),
+        "prestado_caja": round(pres_caja, 2),
         "gastos_caja": round(gas_caja, 2),
         "cobrado_pago_movil": round(cob_movil, 2),
-        "prestado_caja": round(pres_caja, 2),
         "esperado": efec_cierre,
     })
 
