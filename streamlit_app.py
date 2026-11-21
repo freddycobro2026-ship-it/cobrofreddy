@@ -1075,6 +1075,7 @@ with tab_caja_gen:
       id_fondo = f"FND-{uuid.uuid4().hex[:8].upper()}"
       ahora_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
       nombre_cob = cobrador_activo.strip() or "Cobrador"
+      obs_limpia = obs_fondo.strip() or "Sin observación"
 
       append_by_headers(
           ws_fondo,
@@ -1085,7 +1086,7 @@ with tab_caja_gen:
               "cobrador": nombre_cob,
               "monto": round(float(monto_fondo_base), 2),
               "motivo": motivo_fondo,
-              "observacion": obs_fondo.strip(),
+              "observacion": obs_limpia,
           },
           COLS_FONDO_BASE,
           headers_cache,
@@ -1095,8 +1096,7 @@ with tab_caja_gen:
           "FONDO_BASE_CAJA",
           id_fondo,
           float(monto_fondo_base),
-          f"{motivo_fondo} por {nombre_cob} | {obs_fondo.strip() or 'Sin"
-          " observación'}",
+          f"{motivo_fondo} por {nombre_cob} | {obs_limpia}",
           fecha_str,
           headers_cache,
       )
