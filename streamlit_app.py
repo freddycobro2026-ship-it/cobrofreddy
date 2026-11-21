@@ -1374,7 +1374,72 @@ with tab_historial:
     st.info("Aún no hay movimientos registrados por fecha.")
 
   st.subheader("Historial de Pagos (Solo Lectura / Nunca se Borra)")
-  st.dataframe(df_pagos, use_container_width=True, hide_index=True)
+  fechas_pagos = sorted(
+      {
+          f
+          for f in (
+              df_pagos["fecha_hora"].astype(str).str[:10].str.strip()
+              if not df_pagos.empty
+              else []
+          )
+          if f
+      },
+      reverse=True,
+  )
+  default_fecha_pagos = (
+      fecha_str
+      if fecha_str in fechas_pagos
+      else (fechas_pagos[0] if fechas_pagos else fecha_str)
+  )
+  if "filtro_fecha_pagos_sel" not in st.session_state:
+    st.session_state["filtro_fecha_pagos_sel"] = default_fecha_pagos
+
+  f_col1, f_col2, f_col3 = st.columns([2, 2, 1])
+  modo_filtro_pagos = f_col1.radio(
+      "Ver cuotas de:",
+      ["Por fecha", "Todas las fechas"],
+      horizontal=True,
+      key="radio_modo_filtro_pagos",
+  )
+  fecha_pagos_elegida = f_col2.date_input(
+      "Filtrar historial de pagos por fecha",
+      value=date.fromisoformat(st.session_state["filtro_fecha_pagos_sel"]),
+      key="date_filtro_pagos_dia_a_dia",
+  )
+  st.session_state["filtro_fecha_pagos_sel"] = fecha_pagos_elegida.strftime(
+      "%Y-%m-%d"
+  )
+  if f_col3.button("Usar fecha operativa", key="btn_usar_fecha_op_pagos"):
+    st.session_state["filtro_fecha_pagos_sel"] = fecha_str
+    st.rerun()
+
+  fecha_pagos_str = fecha_pagos_elegida.strftime("%Y-%m-%d")
+  if df_pagos.empty:
+    pagos_filtrados_view = df_pagos
+  elif modo_filtro_pagos == "Por fecha":
+    pagos_filtrados_view = df_pagos[
+        df_pagos["fecha_hora"].astype(str).str.startswith(fecha_pagos_str)
+    ].copy()
+  else:
+    pagos_filtrados_view = df_pagos.copy()
+
+  if not pagos_filtrados_view.empty:
+    total_cuotas_filtradas = float(
+        parse_num(pagos_filtrados_view["monto_pagado"]).sum()
+    )
+    st.caption(
+        f"Mostrando **{len(pagos_filtrados_view)}** cuota(s) | Suma de"
+        f" cuotas: **${total_cuotas_filtradas:,.2f}**"
+    )
+  else:
+    st.info(
+        f"No hay cuotas registradas en el historial de pagos para"
+        f" **{fecha_pagos_str}**."
+        if modo_filtro_pagos == "Por fecha"
+        else "No hay cuotas registradas en el historial de pagos."
+    )
+
+  st.dataframe(pagos_filtrados_view, use_container_width=True, hide_index=True)
 
   st.subheader("Historial de Gastos (Solo Lectura / Nunca se Borra)")
   st.dataframe(df_gastos, use_container_width=True, hide_index=True)
