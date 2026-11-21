@@ -591,24 +591,15 @@ efectivo_esperado_caja = round(
     2,
 )
 
-# Saldo esperado general sin sumar dos veces lo recogido del día
-saldo_esperado_general = round(
-    float(saldo_general_sin_salida)
-    + float(efectivo_esperado_caja)
-    - float(total_cobrado_caja_fecha),
-    2,
-)
-
 # --- Encabezado y KPIs del día ---
 st.title(f"Sistema de Cobro — Jornada {fecha_str}")
 
-c1, c2, c3, c4, c5, c6 = st.columns(6)
+c1, c2, c3, c4, c5 = st.columns(5)
 c1.metric("Salida del Día", f"-${monto_caja_inicial:,.2f}")
 c2.metric("Recogido del Día", f"+${total_cobrado_caja_fecha:,.2f}")
 c3.metric("Prestado (En Caja)", f"-${total_prestado_caja_fecha:,.2f}")
 c4.metric("Gastos (En Caja)", f"-${total_gastos_caja_fecha:,.2f}")
 c5.metric("Esperado del Día", f"${efectivo_esperado_caja:,.2f}")
-c6.metric("Saldo Esperado (General)", f"${saldo_esperado_general:,.2f}")
 
 st.caption(
     f"Saldo General: **${caja_general_real:,.2f}** | Saldo General menos"
@@ -1040,17 +1031,15 @@ with tab_caja_gen:
   st.subheader("Balance de Caja General Real (Acumulado Histórico)")
   st.caption(
       "Saldo General = Fondo Base (+) + Llegado Efectivo (+) - Prestado en"
-      " Caja (-) - Gastos en Caja (-). Lo recogido del día no se suma dos"
-      " veces."
+      " Caja (-) - Gastos en Caja (-). No suma salidas del día."
   )
 
-  g1, g2, g3, g4, g5, g6 = st.columns(6)
+  g1, g2, g3, g4, g5 = st.columns(5)
   g1.metric("Fondo Base (+)", f"+${total_fondo_base_gen:,.2f}")
   g2.metric("Llegado Efectivo (+)", f"+${total_cobrado_caja_gen:,.2f}")
   g3.metric("Prestado Caja (-)", f"-${total_prestado_caja_gen:,.2f}")
   g4.metric("Gastos Caja (-)", f"-${total_gastos_caja_gen:,.2f}")
   g5.metric("Saldo General Real", f"${caja_general_real:,.2f}")
-  g6.metric("Saldo Esperado (General)", f"${saldo_esperado_general:,.2f}")
 
   st.markdown("### Registrar Fondo Base / Capital Inicial de Caja General")
   with st.form("form_fondo_base_general", clear_on_submit=True):
@@ -1142,10 +1131,6 @@ with tab_caja_gen:
           "monto": round(efectivo_esperado_caja, 2),
       },
       {
-          "concepto": "SALDO ESPERADO GENERAL (SIN DUPLICAR RECOGIDO)",
-          "monto": round(saldo_esperado_general, 2),
-      },
-      {
           "concepto": "Cobrado por Pago Móvil / Transferencia (Informativo)",
           "monto": round(total_cobrado_movil_gen, 2),
       },
@@ -1169,7 +1154,7 @@ with tab_caja_gen:
     efectivo_contado = col_c1.number_input(
         "Efectivo físico contado al cierre ($)",
         min_value=0.0,
-        value=max(0.0, float(saldo_esperado_general)),
+        value=max(0.0, float(caja_general_real)),
         step=1.0,
         format="%.2f",
         key="input_efectivo_contado_general",
@@ -1188,7 +1173,7 @@ with tab_caja_gen:
       ahora_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
       nombre_cob = cobrador_activo.strip() or "Cobrador"
       diferencia_cierre = round(
-          float(efectivo_contado) - float(saldo_esperado_general), 2
+          float(efectivo_contado) - float(caja_general_real), 2
       )
 
       append_by_headers(
@@ -1199,9 +1184,7 @@ with tab_caja_gen:
               "fecha_hora_cierre": ahora_full,
               "cobrador": nombre_cob,
               "fondo_base_total": round(float(total_fondo_base_gen), 2),
-              "caja_general_calculada": round(
-                  float(saldo_esperado_general), 2
-              ),
+              "caja_general_calculada": round(float(caja_general_real), 2),
               "efectivo_contado_fisico": round(float(efectivo_contado), 2),
               "diferencia": diferencia_cierre,
               "cobrado_efectivo_total": round(
@@ -1225,16 +1208,16 @@ with tab_caja_gen:
           "CIERRE_CAJA_GENERAL",
           id_cierre,
           float(efectivo_contado),
-          f"Cierre general por {nombre_cob} | Esperado:"
-          f" ${saldo_esperado_general:,.2f} | Contado:"
+          f"Cierre general por {nombre_cob} | Calculado:"
+          f" ${caja_general_real:,.2f} | Contado:"
           f" ${float(efectivo_contado):,.2f} | Dif: ${diferencia_cierre:,.2f}",
           fecha_str,
           headers_cache,
       )
       invalidate_sheets_cache()
       st.success(
-          f"Cierre de Caja General **{id_cierre}** guardado. Esperado:"
-          f" **${saldo_esperado_general:,.2f}** | Contado:"
+          f"Cierre de Caja General **{id_cierre}** guardado. Calculado:"
+          f" **${caja_general_real:,.2f}** | Contado:"
           f" **${float(efectivo_contado):,.2f}** | Diferencia:"
           f" **${diferencia_cierre:,.2f}**"
       )
@@ -1371,10 +1354,6 @@ with tab_historial:
 
     # Esperado del día: Salida + Recogido del día - Prestado en caja - Gasto en caja
     esp_dia = round(m_ini + cob_caja - pres_caja - gas_caja, 2)
-    # Saldo esperado general sin sumar dos veces lo recogido del día
-    saldo_esp_dia = round(
-        (float(caja_general_real) - m_ini) + esp_dia - cob_caja, 2
-    )
     resumen_dias.append({
         "fecha": f_dia,
         "clientes_prestados": clientes_prestados_str,
@@ -1384,7 +1363,6 @@ with tab_historial:
         "prestado_caja": round(pres_caja, 2),
         "gastos_caja": round(gas_caja, 2),
         "esperado_dia": esp_dia,
-        "saldo_esperado_general": saldo_esp_dia,
         "cobrado_pago_movil": round(cob_movil, 2),
     })
 
