@@ -24,6 +24,14 @@ COLS_CAJA = [
     "estado",
     "timestamp",
 ]
+COLS_FONDO_BASE = [
+    "id_fondo",
+    "fecha_hora",
+    "cobrador",
+    "monto",
+    "motivo",
+    "observacion",
+]
 COLS_CLIENTES = [
     "id_cliente",
     "nombre",
@@ -72,11 +80,13 @@ COLS_CIERRES_GEN = [
     "id_cierre",
     "fecha_hora_cierre",
     "cobrador",
+    "fondo_base_total",
     "caja_general_calculada",
     "efectivo_contado_fisico",
     "diferencia",
     "cobrado_efectivo_total",
     "cobrado_pago_movil_total",
+    "cajas_sacadas_total",
     "prestado_caja_total",
     "gastos_caja_total",
     "cartera_activa",
@@ -93,6 +103,7 @@ COLS_MOVS = [
 
 HOJAS_CONFIG = [
     ("caja_inicial", COLS_CAJA),
+    ("fondo_base_caja_general", COLS_FONDO_BASE),
     ("clientes", COLS_CLIENTES),
     ("prestamos", COLS_PRESTAMOS),
     ("historial_pagos", COLS_PAGOS),
@@ -339,6 +350,7 @@ ws_map = get_worksheets_map(sh)
 dfs, headers_cache = load_all_sheets_cached(sh, st.session_state["cache_bust"])
 
 ws_caja = ws_map["caja_inicial"]
+ws_fondo = ws_map["fondo_base_caja_general"]
 ws_clientes = ws_map["clientes"]
 ws_prestamos = ws_map["prestamos"]
 ws_pagos = ws_map["historial_pagos"]
@@ -347,6 +359,7 @@ ws_cierres_gen = ws_map["cierres_caja_general"]
 ws_movs = ws_map["historial_movimientos"]
 
 df_caja = dfs["caja_inicial"]
+df_fondo = dfs["fondo_base_caja_general"]
 df_clientes = dfs["clientes"]
 df_prestamos = dfs["prestamos"]
 df_pagos = dfs["historial_pagos"]
@@ -355,7 +368,12 @@ df_cierres_gen = dfs["cierres_caja_general"]
 df_movs = dfs["historial_movimientos"]
 
 # --- Cálculos Generales (Caja Real Acumulada en todo el historial) ---
-# Las cajas iniciales sacadas para salir a ruta se descuentan (-) de Caja General.
+# Fondo base / capital inicial de caja general suma (+).
+# Las cajas iniciales sacadas para salir a ruta se descuentan (-).
+total_fondo_base_gen = (
+    float(parse_num(df_fondo["monto"]).sum()) if not df_fondo.empty else 0.0
+)
+
 total_cajas_sacadas_gen = (
     float(parse_num(df_caja["monto_inicial"]).sum())
     if not df_caja.empty
@@ -396,7 +414,8 @@ else:
   total_gastos_caja_gen = 0.0
 
 caja_general_real = round(
-    total_cobrado_caja_gen
+    total_fondo_base_gen
+    + total_cobrado_caja_gen
     - total_cajas_sacadas_gen
     - total_prestado_caja_gen
     - total_gastos_caja_gen,
@@ -432,7 +451,8 @@ with st.sidebar:
   st.subheader("Caja General Real")
   st.metric("Efectivo Real en Caja (General)", f"${caja_general_real:,.2f}")
   st.caption(
-      f"Cobros efec.: **+${total_cobrado_caja_gen:,.2f}** | Cajas sacadas:"
+      f"Fondo base: **+${total_fondo_base_gen:,.2f}** | Cobros efec.:"
+      f" **+${total_cobrado_caja_gen:,.2f}** | Cajas sacadas:"
       f" **-${total_cajas_sacadas_gen:,.2f}** | Préstamos caja:"
       f" **-${total_prestado_caja_gen:,.2f}** | Gastos caja:"
       f" **-${total_gastos_caja_gen:,.2f}**"
@@ -1011,34 +1031,102 @@ with tab_gastos:
 with tab_caja_gen:
   st.subheader("Balance de Caja General Real (Acumulado Histórico)")
   st.caption(
-      "Los montos de caja inicial sacados para salir a ruta se descuentan"
-      " (-), al igual que préstamos y gastos con cargo a caja; los cobros en"
-      " efectivo suman (+) y Pago Móvil queda aparte."
+      "Suma (+) el fondo base / capital inicial de caja general y los cobros"
+      " en efectivo; descuenta (-) las cajas iniciales sacadas para salir a"
+      " ruta, préstamos y gastos con cargo a caja."
   )
 
-  g1, g2, g3, g4, g5 = st.columns(5)
-  g1.metric("Cobrado Efectivo (Total)", f"+${total_cobrado_caja_gen:,.2f}")
-  g2.metric("Cajas Sacadas (Total)", f"-${total_cajas_sacadas_gen:,.2f}")
-  g3.metric("Prestado en Caja (Total)", f"-${total_prestado_caja_gen:,.2f}")
-  g4.metric("Gastos en Caja (Total)", f"-${total_gastos_caja_gen:,.2f}")
-  g5.metric("Caja General Real", f"${caja_general_real:,.2f}")
+  g1, g2, g3, g4, g5, g6 = st.columns(6)
+  g1.metric("Fondo Base (+)", f"+${total_fondo_base_gen:,.2f}")
+  g2.metric("Cobros Efectivo (+)", f"+${total_cobrado_caja_gen:,.2f}")
+  g3.metric("Cajas Sacadas (-)", f"-${total_cajas_sacadas_gen:,.2f}")
+  g4.metric("Préstamos Caja (-)", f"-${total_prestado_caja_gen:,.2f}")
+  g5.metric("Gastos Caja (-)", f"-${total_gastos_caja_gen:,.2f}")
+  g6.metric("Caja General Real", f"${caja_general_real:,.2f}")
+
+  st.markdown("### Registrar Fondo Base / Capital Inicial de Caja General")
+  with st.form("form_fondo_base_general", clear_on_submit=True):
+    fb_c1, fb_c2, fb_c3 = st.columns(3)
+    monto_fondo_base = fb_c1.number_input(
+        "Monto de fondo base / capital ($)",
+        min_value=0.01,
+        value=100.0,
+        step=10.0,
+        format="%.2f",
+        key="input_monto_fondo_base",
+    )
+    motivo_fondo = fb_c2.selectbox(
+        "Motivo",
+        [
+            "Capital Inicial",
+            "Inyección / Reposición de Fondo",
+            "Ajuste de Caja General",
+        ],
+        key="select_motivo_fondo",
+    )
+    obs_fondo = fb_c3.text_input(
+        "Observación",
+        placeholder="Ej. Capital inicial efectivo para operación",
+        key="input_obs_fondo",
+    )
+
+    btn_guardar_fondo = st.form_submit_button("Registrar Fondo Base en Caja General")
+    if btn_guardar_fondo:
+      id_fondo = f"FND-{uuid.uuid4().hex[:8].upper()}"
+      ahora_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+      nombre_cob = cobrador_activo.strip() or "Cobrador"
+
+      append_by_headers(
+          ws_fondo,
+          "fondo_base_caja_general",
+          {
+              "id_fondo": id_fondo,
+              "fecha_hora": ahora_full,
+              "cobrador": nombre_cob,
+              "monto": round(float(monto_fondo_base), 2),
+              "motivo": motivo_fondo,
+              "observacion": obs_fondo.strip(),
+          },
+          COLS_FONDO_BASE,
+          headers_cache,
+      )
+      append_movimiento(
+          ws_movs,
+          "FONDO_BASE_CAJA",
+          id_fondo,
+          float(monto_fondo_base),
+          f"{motivo_fondo} por {nombre_cob} | {obs_fondo.strip() or 'Sin"
+          " observación'}",
+          fecha_str,
+          headers_cache,
+      )
+      invalidate_sheets_cache()
+      st.success(
+          f"Fondo base **{id_fondo}** por"
+          f" **+${float(monto_fondo_base):,.2f}** registrado en Caja General."
+      )
+      st.rerun()
 
   st.markdown("### Desglose General de la Operación")
   desglose_gen = pd.DataFrame([
       {
-          "concepto": "Total Cobrado en Efectivo / Caja (Excluye Pago Móvil)",
+          "concepto": "Fondo Base / Capital Inicial Acumulado (+)",
+          "monto": round(total_fondo_base_gen, 2),
+      },
+      {
+          "concepto": "Total Cobrado en Efectivo / Caja (+ Excluye Pago Móvil)",
           "monto": round(total_cobrado_caja_gen, 2),
       },
       {
-          "concepto": "Total Cajas Iniciales Sacadas para Ruta (Descuento)",
+          "concepto": "Total Cajas Iniciales Sacadas para Ruta (- Descuento)",
           "monto": round(-total_cajas_sacadas_gen, 2),
       },
       {
-          "concepto": "Total Prestado con Cargo a Caja (afecta_caja = SI)",
+          "concepto": "Total Prestado con Cargo a Caja (- afecta_caja = SI)",
           "monto": round(-total_prestado_caja_gen, 2),
       },
       {
-          "concepto": "Total Gastos con Cargo a Caja (afecta_caja = SI)",
+          "concepto": "Total Gastos con Cargo a Caja (- afecta_caja = SI)",
           "monto": round(-total_gastos_caja_gen, 2),
       },
       {
@@ -1055,6 +1143,12 @@ with tab_caja_gen:
       },
   ])
   st.dataframe(desglose_gen, use_container_width=True, hide_index=True)
+
+  st.markdown("### Historial de Fondo Base / Capital Inicial")
+  if df_fondo.empty:
+    st.info("Aún no se han registrado aportes o ajustes de fondo base.")
+  else:
+    st.dataframe(df_fondo, use_container_width=True, hide_index=True)
 
   st.divider()
   st.subheader("Cierre de Caja General")
@@ -1092,6 +1186,7 @@ with tab_caja_gen:
               "id_cierre": id_cierre,
               "fecha_hora_cierre": ahora_full,
               "cobrador": nombre_cob,
+              "fondo_base_total": round(float(total_fondo_base_gen), 2),
               "caja_general_calculada": round(float(caja_general_real), 2),
               "efectivo_contado_fisico": round(float(efectivo_contado), 2),
               "diferencia": diferencia_cierre,
@@ -1101,6 +1196,7 @@ with tab_caja_gen:
               "cobrado_pago_movil_total": round(
                   float(total_cobrado_movil_gen), 2
               ),
+              "cajas_sacadas_total": round(float(total_cajas_sacadas_gen), 2),
               "prestado_caja_total": round(
                   float(total_prestado_caja_gen), 2
               ),
