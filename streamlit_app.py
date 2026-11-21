@@ -355,7 +355,8 @@ df_cierres_gen = dfs["cierres_caja_general"]
 df_movs = dfs["historial_movimientos"]
 
 # --- Cálculos Generales (Caja Real Acumulada en todo el historial) ---
-total_cajas_iniciales_gen = (
+# Las cajas iniciales sacadas para salir a ruta se descuentan (-) de Caja General.
+total_cajas_sacadas_gen = (
     float(parse_num(df_caja["monto_inicial"]).sum())
     if not df_caja.empty
     else 0.0
@@ -395,8 +396,8 @@ else:
   total_gastos_caja_gen = 0.0
 
 caja_general_real = round(
-    total_cajas_iniciales_gen
-    + total_cobrado_caja_gen
+    total_cobrado_caja_gen
+    - total_cajas_sacadas_gen
     - total_prestado_caja_gen
     - total_gastos_caja_gen,
     2,
@@ -431,8 +432,8 @@ with st.sidebar:
   st.subheader("Caja General Real")
   st.metric("Efectivo Real en Caja (General)", f"${caja_general_real:,.2f}")
   st.caption(
-      f"Cajas inic.: **${total_cajas_iniciales_gen:,.2f}** | Cobros efec.:"
-      f" **+${total_cobrado_caja_gen:,.2f}** | Préstamos caja:"
+      f"Cobros efec.: **+${total_cobrado_caja_gen:,.2f}** | Cajas sacadas:"
+      f" **-${total_cajas_sacadas_gen:,.2f}** | Préstamos caja:"
       f" **-${total_prestado_caja_gen:,.2f}** | Gastos caja:"
       f" **-${total_gastos_caja_gen:,.2f}**"
   )
@@ -450,8 +451,8 @@ with st.sidebar:
     )
     st.success(f"Caja abierta ({fecha_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
-        "El cuadre inicial es único por fecha y no cambia al registrar clientes,"
-        " préstamos ni gastos."
+        "El cuadre inicial es único por fecha y se descuenta de Caja General"
+        " al salir."
     )
   else:
     monto_caja_inicial = 0.0
@@ -460,7 +461,7 @@ with st.sidebar:
     )
     with st.form("form_caja_inicial", clear_on_submit=True):
       monto_input = st.number_input(
-          "Monto inicial en caja ($)",
+          "Monto inicial a sacar de caja ($)",
           min_value=0.0,
           step=10.0,
           format="%.2f",
@@ -488,7 +489,8 @@ with st.sidebar:
             "APERTURA_CAJA",
             fecha_str,
             monto_input,
-            f"Cuadre inicial por {nombre_cob}",
+            f"Salida de caja inicial por {nombre_cob} (descontado de Caja"
+            " General)",
             fecha_str,
             headers_cache,
         )
@@ -1009,14 +1011,14 @@ with tab_gastos:
 with tab_caja_gen:
   st.subheader("Balance de Caja General Real (Acumulado Histórico)")
   st.caption(
-      "Muestra cuánto efectivo queda realmente en caja en el acumulado general"
-      " (excluyendo Pago Móvil / Transferencia y movimientos marcados como"
-      " NO en caja)."
+      "Los montos de caja inicial sacados para salir a ruta se descuentan"
+      " (-), al igual que préstamos y gastos con cargo a caja; los cobros en"
+      " efectivo suman (+) y Pago Móvil queda aparte."
   )
 
   g1, g2, g3, g4, g5 = st.columns(5)
-  g1.metric("Cajas Iniciales (Total)", f"${total_cajas_iniciales_gen:,.2f}")
-  g2.metric("Cobrado Efectivo (Total)", f"+${total_cobrado_caja_gen:,.2f}")
+  g1.metric("Cobrado Efectivo (Total)", f"+${total_cobrado_caja_gen:,.2f}")
+  g2.metric("Cajas Sacadas (Total)", f"-${total_cajas_sacadas_gen:,.2f}")
   g3.metric("Prestado en Caja (Total)", f"-${total_prestado_caja_gen:,.2f}")
   g4.metric("Gastos en Caja (Total)", f"-${total_gastos_caja_gen:,.2f}")
   g5.metric("Caja General Real", f"${caja_general_real:,.2f}")
@@ -1024,12 +1026,12 @@ with tab_caja_gen:
   st.markdown("### Desglose General de la Operación")
   desglose_gen = pd.DataFrame([
       {
-          "concepto": "Suma de Cajas Iniciales Registradas",
-          "monto": round(total_cajas_iniciales_gen, 2),
-      },
-      {
           "concepto": "Total Cobrado en Efectivo / Caja (Excluye Pago Móvil)",
           "monto": round(total_cobrado_caja_gen, 2),
+      },
+      {
+          "concepto": "Total Cajas Iniciales Sacadas para Ruta (Descuento)",
+          "monto": round(-total_cajas_sacadas_gen, 2),
       },
       {
           "concepto": "Total Prestado con Cargo a Caja (afecta_caja = SI)",
