@@ -591,9 +591,11 @@ efectivo_esperado_caja = round(
     2,
 )
 
-# Saldo esperado sumado al saldo general
+# Saldo esperado general sin sumar dos veces lo recogido del día
 saldo_esperado_general = round(
-    float(caja_general_real) + float(efectivo_esperado_caja),
+    float(saldo_general_sin_salida)
+    + float(efectivo_esperado_caja)
+    - float(total_cobrado_caja_fecha),
     2,
 )
 
@@ -1038,8 +1040,8 @@ with tab_caja_gen:
   st.subheader("Balance de Caja General Real (Acumulado Histórico)")
   st.caption(
       "Saldo General = Fondo Base (+) + Llegado Efectivo (+) - Prestado en"
-      " Caja (-) - Gastos en Caja (-). Saldo Esperado = Saldo General +"
-      " Esperado del Día."
+      " Caja (-) - Gastos en Caja (-). Lo recogido del día no se suma dos"
+      " veces."
   )
 
   g1, g2, g3, g4, g5, g6 = st.columns(6)
@@ -1140,7 +1142,7 @@ with tab_caja_gen:
           "monto": round(efectivo_esperado_caja, 2),
       },
       {
-          "concepto": "SALDO ESPERADO (SALDO GENERAL + ESPERADO DEL DÍA)",
+          "concepto": "SALDO ESPERADO GENERAL (SIN DUPLICAR RECOGIDO)",
           "monto": round(saldo_esperado_general, 2),
       },
       {
@@ -1369,8 +1371,10 @@ with tab_historial:
 
     # Esperado del día: Salida + Recogido del día - Prestado en caja - Gasto en caja
     esp_dia = round(m_ini + cob_caja - pres_caja - gas_caja, 2)
-    # Saldo esperado sumado al saldo general
-    saldo_esp_dia = round(float(caja_general_real) + esp_dia, 2)
+    # Saldo esperado general sin sumar dos veces lo recogido del día
+    saldo_esp_dia = round(
+        (float(caja_general_real) - m_ini) + esp_dia - cob_caja, 2
+    )
     resumen_dias.append({
         "fecha": f_dia,
         "clientes_prestados": clientes_prestados_str,
