@@ -467,25 +467,23 @@ with st.sidebar:
     monto_caja_inicial = float(
         parse_num(caja_fecha["monto_inicial"]).iloc[0]
     )
-    st.success(f"Saldo de salida ({fecha_str}): **${monto_caja_inicial:,.2f}**")
+    st.success(f"Salida del día ({fecha_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
-        "El saldo de salida es único por fecha, se descuenta de Caja General"
-        " al salir y se resta de lo llegado en el cálculo del esperado."
+        "Fórmula esperado: Caja General - Salida del día + Llegado del cobro"
+        " - Gastos en caja."
     )
   else:
     monto_caja_inicial = 0.0
-    st.warning(
-        f"Aún no has registrado el saldo de salida para {fecha_str}."
-    )
+    st.warning(f"Aún no has registrado la salida del día para {fecha_str}.")
     with st.form("form_caja_inicial", clear_on_submit=True):
       monto_input = st.number_input(
-          "Monto de salida a sacar de caja ($)",
+          "Monto de salida del día ($)",
           min_value=0.0,
           step=10.0,
           format="%.2f",
           key="input_monto_caja_inicial",
       )
-      submitted_caja = st.form_submit_button("Registrar Cuadre Inicial")
+      submitted_caja = st.form_submit_button("Registrar Salida del Día")
       if submitted_caja:
         nombre_cob = cobrador_activo.strip() or "Cobrador"
         hora_actual = datetime.now().strftime("%H:%M:%S")
@@ -507,8 +505,7 @@ with st.sidebar:
             "APERTURA_CAJA",
             fecha_str,
             monto_input,
-            f"Salida de caja inicial por {nombre_cob} (descontado de Caja"
-            " General)",
+            f"Salida del día por {nombre_cob}",
             fecha_str,
             headers_cache,
         )
@@ -525,8 +522,12 @@ pagos_fecha = (
 if not pagos_fecha.empty:
   pagos_fecha["monto_num"] = parse_num(pagos_fecha["monto_pagado"])
   es_movil_mask = pagos_fecha["metodo_pago"].apply(es_pago_movil)
-  total_cobrado_caja_fecha = pagos_fecha.loc[~es_movil_mask, "monto_num"].sum()
-  total_cobrado_movil_fecha = pagos_fecha.loc[es_movil_mask, "monto_num"].sum()
+  total_cobrado_caja_fecha = float(
+      pagos_fecha.loc[~es_movil_mask, "monto_num"].sum()
+  )
+  total_cobrado_movil_fecha = float(
+      pagos_fecha.loc[es_movil_mask, "monto_num"].sum()
+  )
 else:
   total_cobrado_caja_fecha = 0.0
   total_cobrado_movil_fecha = 0.0
@@ -544,12 +545,12 @@ if not prestamos_fecha.empty:
   afecta_p_mask = (
       prestamos_fecha["afecta_caja"].astype(str).str.strip().str.upper() == "SI"
   )
-  total_prestado_caja_fecha = prestamos_fecha.loc[
-      afecta_p_mask, "monto_num"
-  ].sum()
-  total_prestado_fuera_caja_fecha = prestamos_fecha.loc[
-      ~afecta_p_mask, "monto_num"
-  ].sum()
+  total_prestado_caja_fecha = float(
+      prestamos_fecha.loc[afecta_p_mask, "monto_num"].sum()
+  )
+  total_prestado_fuera_caja_fecha = float(
+      prestamos_fecha.loc[~afecta_p_mask, "monto_num"].sum()
+  )
 else:
   total_prestado_caja_fecha = 0.0
   total_prestado_fuera_caja_fecha = 0.0
@@ -574,21 +575,23 @@ if not gastos_fecha.empty:
       == "SI"
   )
   gasto_no_movil_mask = ~gastos_fecha["metodo_pago"].apply(es_pago_movil)
-  total_gastos_caja_fecha = gastos_fecha.loc[
-      afecta_g_mask & gasto_no_movil_mask, "monto_num"
-  ].sum()
-  total_gastos_fuera_caja_fecha = gastos_fecha.loc[
-      ~(afecta_g_mask & gasto_no_movil_mask), "monto_num"
-  ].sum()
+  total_gastos_caja_fecha = float(
+      gastos_fecha.loc[afecta_g_mask & gasto_no_movil_mask, "monto_num"].sum()
+  )
+  total_gastos_fuera_caja_fecha = float(
+      gastos_fecha.loc[
+          ~(afecta_g_mask & gasto_no_movil_mask), "monto_num"
+      ].sum()
+  )
 else:
   total_gastos_caja_fecha = 0.0
   total_gastos_fuera_caja_fecha = 0.0
 
-# El saldo de salida se resta de lo llegado (cobrado en efectivo del día), junto a préstamos y gastos en caja.
+# Fórmula solicitada: Caja General - Salida del día + Llegado del cobro - Gastos en caja
 efectivo_esperado_caja = round(
-    float(total_cobrado_caja_fecha)
+    float(caja_general_real)
     - float(monto_caja_inicial)
-    - float(total_prestado_caja_fecha)
+    + float(total_cobrado_caja_fecha)
     - float(total_gastos_caja_fecha),
     2,
 )
@@ -597,15 +600,16 @@ efectivo_esperado_caja = round(
 st.title(f"Sistema de Cobro — Jornada {fecha_str}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Llegado (Cobrado Efec.)", f"${total_cobrado_caja_fecha:,.2f}")
-c2.metric("Saldo de Salida", f"-${monto_caja_inicial:,.2f}")
-c3.metric("Prestado (En Caja)", f"-${total_prestado_caja_fecha:,.2f}")
+c1.metric("Caja General", f"${caja_general_real:,.2f}")
+c2.metric("Salida del Día", f"-${monto_caja_inicial:,.2f}")
+c3.metric("Llegado del Cobro", f"+${total_cobrado_caja_fecha:,.2f}")
 c4.metric("Gastos (En Caja)", f"-${total_gastos_caja_fecha:,.2f}")
-c5.metric("Esperado (Llegado - Salida)", f"${efectivo_esperado_caja:,.2f}")
+c5.metric("Esperado", f"${efectivo_esperado_caja:,.2f}")
 
 st.caption(
     f"Pago Móvil / Transf. del día (no suma a caja):"
-    f" **${total_cobrado_movil_fecha:,.2f}** | Prestado sin caja:"
+    f" **${total_cobrado_movil_fecha:,.2f}** | Prestado en caja del día:"
+    f" **${total_prestado_caja_fecha:,.2f}** | Prestado sin caja:"
     f" **${total_prestado_fuera_caja_fecha:,.2f}** | Gastos sin caja:"
     f" **${total_gastos_fuera_caja_fecha:,.2f}** | Cartera activa:"
     f" **${cartera_activa:,.2f}**"
@@ -613,8 +617,8 @@ st.caption(
 
 if caja_fecha.empty:
   st.info(
-      f"Registra primero el **Cuadre de Caja Inicial (Saldo de Salida)** para"
-      f" **{fecha_str}** en la barra lateral para operar."
+      f"Registra primero la **Salida del Día** para **{fecha_str}** en la"
+      " barra lateral para operar."
   )
   st.stop()
 
@@ -1356,17 +1360,21 @@ with tab_historial:
     else:
       gas_caja = 0.0
 
-    efec_cierre = round(cob_caja - m_ini - pres_caja - gas_caja, 2)
+    # Fórmula solicitada: Caja General - Salida del día + Llegado del cobro - Gastos en caja
+    efec_cierre = round(
+        float(caja_general_real) - m_ini + cob_caja - gas_caja, 2
+    )
     resumen_dias.append({
         "fecha": f_dia,
         "clientes_prestados": clientes_prestados_str,
         "detalle_prestamos_dia": detalle_prestamos_str,
-        "llegado_cobrado_caja": round(cob_caja, 2),
-        "saldo_salida": round(m_ini, 2),
+        "caja_general": round(float(caja_general_real), 2),
+        "salida_dia": round(m_ini, 2),
+        "llegado_cobro": round(cob_caja, 2),
+        "gastos_caja": round(gas_caja, 2),
         "cobrado_pago_movil": round(cob_movil, 2),
         "prestado_caja": round(pres_caja, 2),
-        "gastos_caja": round(gas_caja, 2),
-        "esperado_llegado_menos_salida": efec_cierre,
+        "esperado": efec_cierre,
     })
 
   if resumen_dias:
