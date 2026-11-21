@@ -1423,13 +1423,52 @@ with tab_historial:
   else:
     pagos_filtrados_view = df_pagos.copy()
 
+  if df_prestamos.empty:
+    prestamos_filtrados_view = df_prestamos
+  elif modo_filtro_pagos == "Por fecha":
+    prestamos_filtrados_view = df_prestamos[
+        df_prestamos["fecha_inicio"].astype(str).str.strip() == fecha_pagos_str
+    ].copy()
+  else:
+    prestamos_filtrados_view = df_prestamos.copy()
+
+  if df_gastos.empty:
+    gastos_filtrados_view = df_gastos
+  elif modo_filtro_pagos == "Por fecha":
+    gastos_filtrados_view = df_gastos[
+        df_gastos["fecha_hora"].astype(str).str.startswith(fecha_pagos_str)
+    ].copy()
+  else:
+    gastos_filtrados_view = df_gastos.copy()
+
+  total_cuotas_filtradas = (
+      float(parse_num(pagos_filtrados_view["monto_pagado"]).sum())
+      if not pagos_filtrados_view.empty
+      else 0.0
+  )
+  total_prestado_filtrado = (
+      float(parse_num(prestamos_filtrados_view["monto_prestado"]).sum())
+      if not prestamos_filtrados_view.empty
+      else 0.0
+  )
+  total_gastado_filtrado = (
+      float(parse_num(gastos_filtrados_view["monto"]).sum())
+      if not gastos_filtrados_view.empty
+      else 0.0
+  )
+
+  st.caption(
+      f"Cuotas: **{len(pagos_filtrados_view)}**"
+      f" (**${total_cuotas_filtradas:,.2f}**) | Préstamos:"
+      f" **{len(prestamos_filtrados_view)}**"
+      f" (**${total_prestado_filtrado:,.2f}**) | Gastos:"
+      f" **{len(gastos_filtrados_view)}**"
+      f" (**${total_gastado_filtrado:,.2f}**)"
+  )
+
   if not pagos_filtrados_view.empty:
-    total_cuotas_filtradas = float(
-        parse_num(pagos_filtrados_view["monto_pagado"]).sum()
-    )
-    st.caption(
-        f"Mostrando **{len(pagos_filtrados_view)}** cuota(s) | Suma de"
-        f" cuotas: **${total_cuotas_filtradas:,.2f}**"
+    st.dataframe(
+        pagos_filtrados_view, use_container_width=True, hide_index=True
     )
   else:
     st.info(
@@ -1439,7 +1478,35 @@ with tab_historial:
         else "No hay cuotas registradas en el historial de pagos."
     )
 
-  st.dataframe(pagos_filtrados_view, use_container_width=True, hide_index=True)
+  st.markdown(
+      f"### Préstamos en el Filtro"
+      f" ({fecha_pagos_str if modo_filtro_pagos == 'Por fecha' else 'Todas las fechas'})"
+  )
+  if prestamos_filtrados_view.empty:
+    st.info(
+        f"No hay préstamos registrados para **{fecha_pagos_str}**."
+        if modo_filtro_pagos == "Por fecha"
+        else "No hay préstamos registrados."
+    )
+  else:
+    st.dataframe(
+        prestamos_filtrados_view, use_container_width=True, hide_index=True
+    )
+
+  st.markdown(
+      f"### Gastos en el Filtro"
+      f" ({fecha_pagos_str if modo_filtro_pagos == 'Por fecha' else 'Todas las fechas'})"
+  )
+  if gastos_filtrados_view.empty:
+    st.info(
+        f"No hay gastos registrados para **{fecha_pagos_str}**."
+        if modo_filtro_pagos == "Por fecha"
+        else "No hay gastos registrados."
+    )
+  else:
+    st.dataframe(
+        gastos_filtrados_view, use_container_width=True, hide_index=True
+    )
 
   st.subheader("Historial de Gastos (Solo Lectura / Nunca se Borra)")
   st.dataframe(df_gastos, use_container_width=True, hide_index=True)
