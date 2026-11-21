@@ -368,8 +368,6 @@ df_cierres_gen = dfs["cierres_caja_general"]
 df_movs = dfs["historial_movimientos"]
 
 # --- Cálculos Generales (Caja Real Acumulada en todo el historial) ---
-# Fondo base / capital inicial de caja general suma (+).
-# Las cajas iniciales sacadas para salir a ruta se descuentan (-).
 total_fondo_base_gen = (
     float(parse_num(df_fondo["monto"]).sum()) if not df_fondo.empty else 0.0
 )
@@ -469,19 +467,19 @@ with st.sidebar:
     monto_caja_inicial = float(
         parse_num(caja_fecha["monto_inicial"]).iloc[0]
     )
-    st.success(f"Caja abierta ({fecha_str}): **${monto_caja_inicial:,.2f}**")
+    st.success(f"Saldo de salida ({fecha_str}): **${monto_caja_inicial:,.2f}**")
     st.caption(
-        "El cuadre inicial es único por fecha y se descuenta de Caja General"
-        " al salir."
+        "El saldo de salida es único por fecha, se descuenta de Caja General"
+        " al salir y se resta de lo llegado en el cálculo del esperado."
     )
   else:
     monto_caja_inicial = 0.0
     st.warning(
-        f"Aún no has registrado el cuadre de caja inicial para {fecha_str}."
+        f"Aún no has registrado el saldo de salida para {fecha_str}."
     )
     with st.form("form_caja_inicial", clear_on_submit=True):
       monto_input = st.number_input(
-          "Monto inicial a sacar de caja ($)",
+          "Monto de salida a sacar de caja ($)",
           min_value=0.0,
           step=10.0,
           format="%.2f",
@@ -586,22 +584,24 @@ else:
   total_gastos_caja_fecha = 0.0
   total_gastos_fuera_caja_fecha = 0.0
 
-efectivo_esperado_caja = (
-    monto_caja_inicial
-    + total_cobrado_caja_fecha
-    - total_prestado_caja_fecha
-    - total_gastos_caja_fecha
+# El saldo de salida se resta de lo llegado (cobrado en efectivo del día), junto a préstamos y gastos en caja.
+efectivo_esperado_caja = round(
+    float(total_cobrado_caja_fecha)
+    - float(monto_caja_inicial)
+    - float(total_prestado_caja_fecha)
+    - float(total_gastos_caja_fecha),
+    2,
 )
 
 # --- Encabezado y KPIs del día ---
 st.title(f"Sistema de Cobro — Jornada {fecha_str}")
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("Caja Inicial", f"${monto_caja_inicial:,.2f}")
-c2.metric("Cobrado en Caja (Efec.)", f"${total_cobrado_caja_fecha:,.2f}")
-c3.metric("Prestado (En Caja)", f"${total_prestado_caja_fecha:,.2f}")
-c4.metric("Gastos (En Caja)", f"${total_gastos_caja_fecha:,.2f}")
-c5.metric("Efectivo Esperado en Caja", f"${efectivo_esperado_caja:,.2f}")
+c1.metric("Llegado (Cobrado Efec.)", f"${total_cobrado_caja_fecha:,.2f}")
+c2.metric("Saldo de Salida", f"-${monto_caja_inicial:,.2f}")
+c3.metric("Prestado (En Caja)", f"-${total_prestado_caja_fecha:,.2f}")
+c4.metric("Gastos (En Caja)", f"-${total_gastos_caja_fecha:,.2f}")
+c5.metric("Esperado (Llegado - Salida)", f"${efectivo_esperado_caja:,.2f}")
 
 st.caption(
     f"Pago Móvil / Transf. del día (no suma a caja):"
@@ -613,8 +613,8 @@ st.caption(
 
 if caja_fecha.empty:
   st.info(
-      f"Registra primero el **Cuadre de Caja Inicial** para **{fecha_str}**"
-      " en la barra lateral para operar."
+      f"Registra primero el **Cuadre de Caja Inicial (Saldo de Salida)** para"
+      f" **{fecha_str}** en la barra lateral para operar."
   )
   st.stop()
 
@@ -1356,17 +1356,17 @@ with tab_historial:
     else:
       gas_caja = 0.0
 
-    efec_cierre = round(m_ini + cob_caja - pres_caja - gas_caja, 2)
+    efec_cierre = round(cob_caja - m_ini - pres_caja - gas_caja, 2)
     resumen_dias.append({
         "fecha": f_dia,
         "clientes_prestados": clientes_prestados_str,
         "detalle_prestamos_dia": detalle_prestamos_str,
-        "caja_inicial": round(m_ini, 2),
-        "cobrado_caja": round(cob_caja, 2),
+        "llegado_cobrado_caja": round(cob_caja, 2),
+        "saldo_salida": round(m_ini, 2),
         "cobrado_pago_movil": round(cob_movil, 2),
         "prestado_caja": round(pres_caja, 2),
         "gastos_caja": round(gas_caja, 2),
-        "efectivo_esperado_caja": efec_cierre,
+        "esperado_llegado_menos_salida": efec_cierre,
     })
 
   if resumen_dias:
